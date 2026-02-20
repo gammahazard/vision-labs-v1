@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision Labs — Login</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <style>
+        /* Use the same color palette as the dashboard */
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-panel: #1a2235;
+            --border: #2d3748;
+            --border-active: #4ade80;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #4ade80;
+            --accent-dim: #22c55e;
+            --accent-bg: rgba(74, 222, 128, 0.1);
+            --danger: #ef4444;
+        }
+
+        *,
+        *::before,
+        *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        /* ---- Subtle background grid ---- */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(74, 222, 128, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(74, 222, 128, 0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ---- Login container ---- */
+        .login-container {
+            position: relative;
+            z-index: 1;
+            width: 100%;
+            max-width: 400px;
+            padding: 0 20px;
+        }
+
+        /* ---- Eye icon area ---- */
+        .eye-container {
+            text-align: center;
+            margin-bottom: 32px;
+            animation: fadeInDown 0.8s ease forwards;
+        }
+
+        .eye-icon {
+            font-size: 64px;
+            display: inline-block;
+            animation: pulse 2.5s ease-in-out infinite;
+            filter: drop-shadow(0 0 20px rgba(74, 222, 128, 0.4));
+        }
+
+        .brand-title {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-top: 12px;
+            letter-spacing: 0.5px;
+        }
+
+        .brand-subtitle {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-top: 4px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        /* ---- Login card ---- */
+        .login-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 36px 32px;
+            opacity: 0;
+            transform: translateY(16px);
+            animation: fadeInUp 0.7s ease 0.5s forwards;
+        }
+
+        /* ---- Form elements ---- */
+        .form-group {
+            margin-bottom: 20px;
+            opacity: 0;
+            transform: translateY(10px);
+        }
+
+        .form-group:nth-child(1) {
+            animation: fadeInUp 0.5s ease 0.8s forwards;
+        }
+
+        .form-group:nth-child(2) {
+            animation: fadeInUp 0.5s ease 1.0s forwards;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 15px;
+            font-family: inherit;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            outline: none;
+        }
+
+        .form-group input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-bg);
+        }
+
+        .form-group input::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* ---- Submit button ---- */
+        .login-btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, var(--accent-dim), var(--accent));
+            border: none;
+            border-radius: 8px;
+            color: #0a0e17;
+            font-size: 15px;
+            font-weight: 700;
+            font-family: inherit;
+            cursor: pointer;
+            letter-spacing: 0.5px;
+            transition: transform 0.15s ease, box-shadow 0.2s ease;
+            opacity: 0;
+            transform: translateY(10px);
+            animation: fadeInUp 0.5s ease 1.2s forwards;
+        }
+
+        .login-btn:hover {
+            transform: translateY(-1px) !important;
+            box-shadow: 0 4px 20px rgba(74, 222, 128, 0.3);
+        }
+
+        .login-btn:active {
+            transform: translateY(0) !important;
+        }
+
+        .login-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        /* ---- Error message ---- */
+        .error-msg {
+            text-align: center;
+            color: var(--danger);
+            font-size: 13px;
+            font-weight: 500;
+            margin-top: 16px;
+            min-height: 20px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .error-msg.visible {
+            opacity: 1;
+        }
+
+        /* ---- Status dot ---- */
+        .status-line {
+            text-align: center;
+            margin-top: 24px;
+            font-size: 12px;
+            color: var(--text-muted);
+            opacity: 0;
+            animation: fadeInUp 0.5s ease 1.4s forwards;
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            background: var(--accent);
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: blink 2s ease-in-out infinite;
+        }
+
+        /* ---- Animations ---- */
+        @keyframes pulse {
+
+            0%,
+            100% {
+                transform: scale(1);
+                filter: drop-shadow(0 0 20px rgba(74, 222, 128, 0.4));
+            }
+
+            50% {
+                transform: scale(1.08);
+                filter: drop-shadow(0 0 35px rgba(74, 222, 128, 0.6));
+            }
+        }
+
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(16px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes blink {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
+        }
+
+        /* ---- Scan line effect ---- */
+        .login-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            opacity: 0;
+            animation: scanReveal 1.5s ease 0.5s forwards;
+        }
+
+        .login-card {
+            position: relative;
+            overflow: hidden;
+        }
+
+        @keyframes scanReveal {
+            0% {
+                opacity: 0;
+                top: 0;
+            }
+
+            30% {
+                opacity: 0.8;
+            }
+
+            100% {
+                opacity: 0;
+                top: 100%;
+            }
+        }
+
+        /* ---- Mobile responsive ---- */
+        @media (max-width: 480px) {
+            .login-card {
+                padding: 28px 24px;
+            }
+
+            .eye-icon {
+                font-size: 52px;
+            }
+
+            .brand-title {
+                font-size: 19px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="login-container">
+        <div class="eye-container">
+            <div class="eye-icon">👁️</div>
+            <div class="brand-title">Vision Labs</div>
+            <div class="brand-subtitle">Security Dashboard</div>
+        </div>
+
+        <div class="login-card">
+            <form id="loginForm" onsubmit="handleLogin(event)">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" placeholder="Enter username"
+                        autocomplete="username" required autofocus>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter password"
+                        autocomplete="current-password" required>
+                </div>
+                <button type="submit" class="login-btn" id="loginBtn">Sign In</button>
+                <div class="error-msg" id="errorMsg"></div>
+            </form>
+        </div>
+
+        <div class="status-line">
+            <span class="status-dot"></span>
+            System Active
+        </div>
+    </div>
+
+    <script>
+        async function handleLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const errEl = document.getElementById('errorMsg');
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+
+            btn.disabled = true;
+            btn.textContent = 'Authenticating...';
+            errEl.classList.remove('visible');
+            errEl.textContent = '';
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password }),
+                });
+
+                const data = await res.json();
+
+                if (res.ok) {
+                    btn.textContent = 'Access Granted ✓';
+                    btn.style.background = 'var(--accent)';
+                    setTimeout(() => { window.location.href = '/'; }, 500);
+                } else {
+                    errEl.textContent = data.error || 'Authentication failed';
+                    errEl.classList.add('visible');
+                    btn.disabled = false;
+                    btn.textContent = 'Sign In';
+                    document.getElementById('password').value = '';
+                    document.getElementById('password').focus();
+                }
+            } catch (err) {
+                errEl.textContent = 'Connection error — try again';
+                errEl.classList.add('visible');
+                btn.disabled = false;
+                btn.textContent = 'Sign In';
+            }
+        }
+    </script>
+</body>
+
+</html>

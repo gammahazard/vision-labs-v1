@@ -1,0 +1,279 @@
+"""
+services/camera-ingester/ingester.py — Captures RTSP frames and publishes to Redis.
+
+PURPOSE:
+    This is the entry point for all video data in the Vision Labs pipeline.
+    It connects to a camera's RTSP stream, decodes each frame, JPEG-encodes it,
+    and publishes it to a Redis Stream. Every downstream service (detectors,
+    dashboard, recorder) consumes frames from Redis — not from the camera directly.
+
+RELATIONSHIPS:
+    - Reads camera credentials from environment variables (set in .env / docker-compose)
+    - Publishes to Redis Stream key defined in contracts/streams.py (FRAME_STREAM)
+    - Downstream consumers: pose-detector (Phase 2), dashboard (Phase 3)
+
+WHY REDIS STREAMS (not direct RTSP per service):
+    - One RTSP connection per camera, not N connections per N services
+    - If a detector crashes, the ingester keeps running — no frame loss
+    - Redis Streams provide backpressure and history replay
+    - Adding a new consumer is zero config — just subscribe to the stream
+
+CONFIG (via environment variables):
+    CAMERA_ID       — Unique camera name (e.g., "front_door")
+    RTSP_URL        — Full RTSP URL including credentials
+    REDIS_HOST      — Redis server hostname (default: localhost)
+    REDIS_PORT      — Redis server port (default: 6379)
+    TARGET_FPS      — How many frames/sec to publish (default: 5)
+    JPEG_QUALITY    — JPEG compression quality 1-100 (default: 80)
+    MAX_STREAM_LEN  — Max frames to keep in Redis stream (default: 1000)
+"""
+
+import os
+import sys
+import time
+import signal
+import logging
+
+import cv2
+import redis
+
+# Import stream key definitions from contracts (single source of truth)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "contracts"))
+from streams import FRAME_STREAM as _FRAME_TMPL, stream_key
+
+# ---------------------------------------------------------------------------
+# Configuration from environment variables
+# ---------------------------------------------------------------------------
+CAMERA_ID = os.getenv("CAMERA_ID", "front_door")
+RTSP_URL = os.getenv("RTSP_URL", "")
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+TARGET_FPS = int(os.getenv("TARGET_FPS", "5"))
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "80"))
+MAX_STREAM_LEN = int(os.getenv("MAX_STREAM_LEN", "1000"))
+
+# Redis Stream key — resolved from contracts/streams.py
+STREAM_KEY = stream_key(_FRAME_TMPL, camera_id=CAMERA_ID)
+
+# How long to wait before retrying a failed RTSP connection
+RECONNECT_DELAY_SECONDS = 5
+MAX_RECONNECT_DELAY = 30  # Cap the backoff so we don't wait forever
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("camera-ingester")
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown
+# ---------------------------------------------------------------------------
+_shutdown = False
+
+
+def _handle_signal(signum, frame):
+    """Handle SIGTERM/SIGINT for graceful Docker container shutdown."""
+    global _shutdown
+    logger.info("Shutdown signal received — finishing current frame...")
+    _shutdown = True
+
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
+
+
+# ---------------------------------------------------------------------------
+# RTSP Connection
+# ---------------------------------------------------------------------------
+def connect_to_camera(rtsp_url: str) -> cv2.VideoCapture:
+    """
+    Open an RTSP stream via OpenCV.
+
+    Uses TCP transport for reliability (UDP can drop frames on congested networks).
+    Sets a small buffer size so we always get the most recent frame, not a stale
+    buffered one — important for real-time security monitoring.
+    """
+    logger.info(f"Connecting to RTSP stream: {rtsp_url.split('@')[-1]}")  # Log URL without password
+
+    # Force TCP transport and minimize buffer for low latency
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+
+    # Small buffer = low latency (we want the latest frame, not queued ones)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    if not cap.isOpened():
+        raise ConnectionError(f"Failed to open RTSP stream")
+
+    # Read camera properties for logging
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    logger.info(f"Connected — resolution: {width}x{height}, camera FPS: {fps}")
+
+    return cap
+
+
+# ---------------------------------------------------------------------------
+# Redis Connection
+# ---------------------------------------------------------------------------
+def connect_to_redis(host: str, port: int) -> redis.Redis:
+    """
+    Connect to Redis and verify the connection.
+
+    The Redis client will auto-reconnect if the connection drops, but we
+    verify it's reachable on startup to fail fast if Redis isn't running.
+    """
+    logger.info(f"Connecting to Redis at {host}:{port}")
+    r = redis.Redis(host=host, port=port, decode_responses=False)
+    r.ping()  # Raises ConnectionError if Redis is unreachable
+    logger.info("Redis connection verified")
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Frame Publishing
+# ---------------------------------------------------------------------------
+def publish_frame(
+    r: redis.Redis,
+    frame: bytes,
+    frame_number: int,
+    width: int,
+    height: int,
+) -> None:
+    """
+    Publish a single JPEG-encoded frame to the Redis Stream.
+
+    Uses XADD with MAXLEN to cap the stream size — old frames are automatically
+    trimmed so Redis doesn't eat all your RAM. The '~' prefix on MAXLEN tells
+    Redis to trim approximately (more efficient than exact trimming).
+
+    The message fields match the FrameMessage schema in contracts/streams.py.
+    """
+    r.xadd(
+        STREAM_KEY,
+        {
+            "camera_id": CAMERA_ID,
+            "timestamp": str(time.time()),
+            "frame": frame,
+            "frame_number": str(frame_number),
+            "width": str(width),
+            "height": str(height),
+        },
+        maxlen=MAX_STREAM_LEN,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main Ingestion Loop
+# ---------------------------------------------------------------------------
+def run():
+    """
+    Main loop: connect to camera + Redis, then continuously capture frames
+    and publish them to the Redis Stream.
+
+    Handles two failure modes:
+    1. Camera disconnect — retries with exponential backoff
+    2. Redis disconnect — Redis client auto-reconnects, we just retry the XADD
+    """
+    if not RTSP_URL:
+        logger.error("RTSP_URL not set — check your .env or docker-compose.yml")
+        sys.exit(1)
+
+    logger.info(f"Starting camera ingester for '{CAMERA_ID}'")
+    logger.info(f"Target FPS: {TARGET_FPS}, JPEG quality: {JPEG_QUALITY}")
+    logger.info(f"Stream key: {STREAM_KEY}, max length: {MAX_STREAM_LEN}")
+
+    # Connect to Redis (fail fast if it's not ready)
+    r = connect_to_redis(REDIS_HOST, REDIS_PORT)
+
+    frame_number = 0
+    reconnect_delay = RECONNECT_DELAY_SECONDS
+    frame_interval = 1.0 / TARGET_FPS  # Seconds between frames
+
+    while not _shutdown:
+        # --- Connect to camera (with retry) ---
+        try:
+            cap = connect_to_camera(RTSP_URL)
+            reconnect_delay = RECONNECT_DELAY_SECONDS  # Reset backoff on success
+        except Exception as e:
+            logger.error(f"Camera connection failed: {e}")
+            logger.info(f"Retrying in {reconnect_delay}s...")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
+            continue
+
+        # --- Read camera properties ---
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # --- Frame capture loop ---
+        last_frame_time = 0.0
+        consecutive_failures = 0
+
+        while not _shutdown:
+            # Throttle to TARGET_FPS (don't flood Redis with 15 FPS if we only need 5)
+            now = time.time()
+            elapsed = now - last_frame_time
+            if elapsed < frame_interval:
+                # Read and discard frames to keep the buffer fresh
+                cap.grab()
+                time.sleep(0.001)  # Yield CPU
+                continue
+
+            # Read a frame from the RTSP stream
+            ret, frame = cap.read()
+
+            if not ret:
+                consecutive_failures += 1
+                if consecutive_failures >= 30:
+                    logger.warning("Too many consecutive read failures — reconnecting...")
+                    break  # Break inner loop to trigger reconnect
+                time.sleep(0.1)
+                continue
+
+            consecutive_failures = 0
+
+            # Encode frame as JPEG
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+            _, jpeg_buffer = cv2.imencode(".jpg", frame, encode_params)
+            jpeg_bytes = jpeg_buffer.tobytes()
+
+            # Publish to Redis Stream
+            try:
+                publish_frame(r, jpeg_bytes, frame_number, width, height)
+            except redis.ConnectionError as e:
+                logger.warning(f"Redis publish failed (will retry): {e}")
+                time.sleep(1)
+                continue
+
+            frame_number += 1
+            last_frame_time = time.time()
+
+            # Log progress periodically (every 100 frames)
+            if frame_number % 100 == 0:
+                logger.info(
+                    f"Published frame #{frame_number} "
+                    f"({len(jpeg_bytes) / 1024:.1f} KB) "
+                    f"to {STREAM_KEY}"
+                )
+
+        # --- Cleanup after disconnect ---
+        cap.release()
+        if not _shutdown:
+            logger.info(f"Camera disconnected — retrying in {reconnect_delay}s...")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
+
+    logger.info(f"Ingester stopped. Total frames published: {frame_number}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    run()

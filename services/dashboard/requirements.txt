@@ -1,0 +1,23 @@
+# services/dashboard/requirements.txt
+#
+# Dependencies for the dashboard backend.
+# FastAPI serves the WebSocket + REST API, OpenCV draws detection overlays.
+
+# Web framework and ASGI server
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+
+# Redis client for reading streams and config
+redis==5.2.1
+
+# OpenCV headless for drawing bounding boxes on frames
+opencv-python-headless==4.10.0.84
+
+# NumPy for frame decoding
+numpy>=1.24.0
+
+# HTTP client for proxying face enrollment requests
+httpx==0.27.0
+
+# Sunrise/sunset calculations for time-of-day rules (used by /api/conditions)
+astral==3.2
