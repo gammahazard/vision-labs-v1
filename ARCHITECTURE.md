@@ -392,7 +392,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `browse.py` | `GET /api/browse/days`, `GET /api/browse/days/{date}`, `GET /api/browse/snapshot/{date}/{filename}`, `GET /api/browse/faces` | Vehicle snapshot browser + enrolled faces gallery |
 | `ai.py` | `GET /api/ai/status`, `GET /api/ai/config`, `POST /api/ai/config`, `POST /api/ai/chat`, `GET /api/ai/history`, `DELETE /api/ai/history`, `POST /api/ai/reset`, `GET /api/ai/reminders`, `GET /api/ai/clip/{filename}` | AI assistant: Ollama chat + 18 tools (events, faces, unknowns, feedback, retrain, live scene, capture snapshot, capture clip, weather, event patterns, browse vehicles, zones, notification history, Telegram, reminders, status, review, events by date) |
 
-**Shared state pattern:** `routes/__init__.py` defines module-level variables (`r`, `logger`, `FACE_API_URL`, all stream keys). `server.py` sets these before importing routers. Each route module does `import routes as ctx` to access them.
+**Shared state pattern:** `routes/__init__.py` defines module-level variables (`r`, `logger`, `FACE_API_URL`, `HD_FRAME_KEY`, all stream keys). `server.py` sets these before importing routers. Each route module does `import routes as ctx` to access them.
 
 ---
 
@@ -488,10 +488,13 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 
 | Event | Trigger | Rate Limited? | Photo Source |
 |-------|---------|---------------|--------------|
-| Person detected | `person_appeared` event | Yes (1 per 60s) | Latest Redis frame |
-| Person identified | `person_identified` event | No (always important) | Latest Redis frame |
+| Person detected | `person_appeared` event | Yes (1 per 60s) | HD frame (fallback: sub-stream) + bbox highlight |
+| Person identified | `person_identified` event | No (always important) | HD frame (fallback: sub-stream) + bbox highlight |
+| Vehicle idle | `vehicle_idle` event | Yes (1 per 60s) | HD frame (fallback: sub-stream) |
 | Face enrolled | Enrollment API success | No | Face thumbnail from face-recognizer |
-| Test notification | Manual button click | No | Latest Redis frame |
+| Test notification | Manual button click | No | HD frame (fallback: sub-stream) |
+
+`get_latest_frame()` tries `frame_hd:{camera_id}` first for higher resolution, falling back to the sub-stream. `draw_bbox_on_frame()` scales bbox coordinates from sub-stream pixels to HD resolution when the HD frame is used.
 
 **Architecture:** The dashboard runs a background `asyncio` task (`_event_notification_poller`) that does `XREAD` on the event stream in a thread executor (to avoid blocking the event loop). For every `person_appeared` event, it saves a camera snapshot to `/data/snapshots/` (used by the event feed thumbnails). When Telegram is configured and relevant events fire, it calls `send_photo()` which POSTs to Telegram's `sendPhoto` endpoint.
 
