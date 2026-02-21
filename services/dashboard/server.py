@@ -190,6 +190,7 @@ VEHICLE_SNAPSHOT_DIR = os.path.join(os.environ.get("SNAPSHOT_DIR", "/data/snapsh
 os.makedirs(VEHICLE_SNAPSHOT_DIR, exist_ok=True)
 route_ctx.VEHICLE_SNAPSHOT_DIR = VEHICLE_SNAPSHOT_DIR
 route_ctx.CAMERA_ID = CAMERA_ID
+route_ctx.HD_FRAME_KEY = HD_FRAME_KEY
 
 from routes.events import router as events_router
 from routes.config import router as config_router

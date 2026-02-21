@@ -35,6 +35,7 @@ ZONE_KEY: str = ""
 AUTH_DB_PATH: str = ""
 VEHICLE_SNAPSHOT_DIR: str = ""       # Vehicle snapshot disk storage root
 CAMERA_ID: str = "front_door"        # Camera identifier (set by server.py)
+HD_FRAME_KEY: str = ""               # HD frame Redis key (set by server.py)
 
 # Default config values
 DEFAULT_CONFIG = {

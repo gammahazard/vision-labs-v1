@@ -34,6 +34,8 @@ from zoneinfo import ZoneInfo
 
 import redis
 import httpx
+import numpy as np
+import cv2
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
@@ -186,15 +188,26 @@ async def answer_callback_query(callback_query_id: str,
 
 # ---------------------------------------------------------------------------
 # Snapshot helper — grab latest frame from Redis (BINARY client)
+# Prefers HD frame for higher quality, falls back to sub-stream.
 # ---------------------------------------------------------------------------
 def get_latest_frame() -> bytes | None:
     """
-    Get the latest JPEG frame from the Redis frame stream.
+    Get the latest JPEG frame from Redis.
+    Tries the HD frame first (frame_hd:{camera_id}), then falls
+    back to the sub-stream (frames:{camera_id}).
     Uses a SEPARATE binary Redis client (decode_responses=False)
     because frame data is raw JPEG bytes.
     """
     try:
         r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+
+        # --- Try HD frame first (clearer image) ---
+        if ctx.HD_FRAME_KEY:
+            hd_bytes = r_bin.get(ctx.HD_FRAME_KEY.encode())
+            if hd_bytes and len(hd_bytes) > 100:
+                return hd_bytes
+
+        # --- Fall back to sub-stream ---
         entries = r_bin.xrevrange(ctx.FRAME_STREAM.encode(), count=1)
         if entries:
             _, data = entries[0]
@@ -205,6 +218,66 @@ def get_latest_frame() -> bytes | None:
     except Exception as e:
         logger.warning(f"Failed to get latest frame: {e}")
     return None
+
+
+def get_sd_frame() -> bytes | None:
+    """Get the sub-stream (SD) frame only — used for bbox coordinate reference."""
+    try:
+        r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+        entries = r_bin.xrevrange(ctx.FRAME_STREAM.encode(), count=1)
+        if entries:
+            _, data = entries[0]
+            frame = data.get(b"frame")
+            if frame and len(frame) > 100:
+                return frame
+    except Exception:
+        pass
+    return None
+
+
+def draw_bbox_on_frame(frame_bytes: bytes, bbox_json: str,
+                       label: str = "",
+                       color: tuple = (0, 255, 0)) -> bytes:
+    """
+    Draw a bounding box highlight on a JPEG frame.
+    If the frame is HD, scales bbox coords from sub-stream dimensions.
+    Returns the modified JPEG bytes.
+    """
+    try:
+        bbox = json.loads(bbox_json) if isinstance(bbox_json, str) else bbox_json
+        if not bbox or len(bbox) != 4:
+            return frame_bytes
+
+        np_arr = np.frombuffer(frame_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return frame_bytes
+
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        snap_h, snap_w = img.shape[:2]
+
+        # If snapshot is HD (>= 1000px wide), scale bbox from SD coords
+        if snap_w >= 1000:
+            sd_frame = get_sd_frame()
+            if sd_frame:
+                sd_arr = np.frombuffer(sd_frame, np.uint8)
+                sd_img = cv2.imdecode(sd_arr, cv2.IMREAD_COLOR)
+                if sd_img is not None:
+                    sd_h, sd_w = sd_img.shape[:2]
+                    sx = snap_w / sd_w
+                    sy = snap_h / sd_h
+                    x1, y1, x2, y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
+
+        ix1, iy1, ix2, iy2 = int(x1), int(y1), int(x2), int(y2)
+        cv2.rectangle(img, (ix1, iy1), (ix2, iy2), color, 3)
+        if label:
+            cv2.putText(img, label, (ix1, iy1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        _, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        return encoded.tobytes()
+    except Exception:
+        return frame_bytes
 
 
 async def send_video(video_bytes: bytes, caption: str = "") -> int:
@@ -354,6 +427,11 @@ async def notify_person_detected(event_data: dict,
 
     frame = get_latest_frame()
     if frame:
+        # Draw bbox highlight on the snapshot if available
+        bbox_json = event_data.get("bbox", "")
+        if bbox_json:
+            frame = draw_bbox_on_frame(frame, bbox_json,
+                                       label=name, color=(0, 255, 0))
         msg_id = await send_photo(frame, caption, reply_markup=buttons)
     else:
         await send_text(caption)
@@ -418,6 +496,12 @@ async def notify_person_identified(event_data: dict,
 
     frame = get_latest_frame()
     if frame:
+        # Draw bbox highlight on the snapshot if available
+        bbox_json = event_data.get("bbox", "")
+        if bbox_json:
+            frame = draw_bbox_on_frame(frame, bbox_json,
+                                       label=identity_name,
+                                       color=(255, 255, 0))
         msg_id = await send_photo(frame, caption, reply_markup=buttons)
     else:
         await send_text(caption)
