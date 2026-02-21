@@ -168,6 +168,7 @@ from routes.notifications import router as notifications_router
 from routes.auth import router as auth_router, init_auth_db, validate_session
 from routes.browse import router as browse_router
 from routes.feedback import router as feedback_router, set_feedback_db
+from routes.ai import router as ai_router, set_ai_db, set_feedback_db as ai_set_feedback_db
 
 app.include_router(events_router)
 app.include_router(config_router)
@@ -179,6 +180,7 @@ app.include_router(notifications_router)
 app.include_router(auth_router)
 app.include_router(browse_router)
 app.include_router(feedback_router)
+app.include_router(ai_router)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +241,14 @@ async def startup():
     set_feedback_db(_feedback_db)
     logger.info("Feedback database initialized")
 
+    # Initialize AI assistant database
+    from ai_db import AIDB
+    global _ai_db
+    _ai_db = AIDB("/data/ai.db")
+    set_ai_db(_ai_db)
+    ai_set_feedback_db(_feedback_db)
+    logger.info("AI assistant database initialized")
+
     # Start background event notification poller
     asyncio.create_task(_event_notification_poller())
 
@@ -246,7 +256,55 @@ async def startup():
     from routes.notifications import poll_telegram_callbacks
     asyncio.create_task(poll_telegram_callbacks(_feedback_db))
 
+    # Start reminder poller (checks every 60s for due reminders)
+    asyncio.create_task(_reminder_poller(_ai_db))
+
+    # Pull the AI model on first startup (background)
+    asyncio.create_task(_ensure_ollama_model())
+
     logger.info(f"Dashboard ready at http://localhost:{DASHBOARD_PORT}")
+
+
+async def _reminder_poller(ai_db):
+    """Background task: check for due reminders every 60 seconds and send via Telegram."""
+    from routes.notifications import send_text, is_configured
+    await asyncio.sleep(10)  # Initial delay
+    while True:
+        try:
+            if is_configured() and ai_db:
+                due = ai_db.get_due_reminders()
+                for reminder in due:
+                    try:
+                        await send_text(f"⏰ Reminder: {reminder['message']}")
+                        ai_db.mark_reminder_sent(reminder["id"])
+                        logger.info(f"Sent reminder {reminder['id']}: {reminder['message']}")
+                    except Exception as e:
+                        logger.warning(f"Failed to send reminder {reminder['id']}: {e}")
+        except Exception as e:
+            logger.warning(f"Reminder poller error: {e}")
+        await asyncio.sleep(60)
+
+
+async def _ensure_ollama_model():
+    """Background task: pull the AI model on first startup if not already cached."""
+    import ollama as ollama_lib
+    import os
+    host = os.getenv("OLLAMA_HOST", "http://ollama:11434")
+    model = "qwen3:14b"
+    await asyncio.sleep(5)  # Wait for Ollama to fully start
+    try:
+        client = ollama_lib.Client(host=host)
+        # Check if model already exists
+        models = client.list()
+        model_names = [m.model for m in models.models] if models.models else []
+        if any(model in name for name in model_names):
+            logger.info(f"AI model '{model}' already available")
+            return
+        logger.info(f"Pulling AI model '{model}' (~9.3 GB, first-time download)...")
+        client.pull(model)
+        logger.info(f"AI model '{model}' downloaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to pull AI model: {e} (AI chat will be unavailable until model is pulled)")
 
 
 async def _event_notification_poller():

@@ -21,3 +21,6 @@ httpx==0.27.0
 
 # Sunrise/sunset calculations for time-of-day rules (used by /api/conditions)
 astral==3.2
+
+# Ollama client for local LLM (AI assistant)
+ollama>=0.4.0

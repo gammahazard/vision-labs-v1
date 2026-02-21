@@ -195,6 +195,31 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # Ollama — Local LLM inference (Qwen 3 14B)
+  # ---------------------------------------------------------------------------
+  # Runs the Ollama model server with GPU access. The model weights are
+  # downloaded on first startup (~9.3 GB) and cached in a Docker volume.
+  # Dashboard routes AI chat requests to http://ollama:11434.
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "ollama", "list" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
   # Dashboard — Live monitoring UI
   # ---------------------------------------------------------------------------
   # Web dashboard accessible at http://localhost:8080. Shows live camera feed
@@ -216,6 +241,7 @@ services:
       - DASHBOARD_PORT=8080
       - FACE_API_URL=http://face-recognizer:8081
       - AUTH_DB_PATH=/data/auth.db
+      - OLLAMA_HOST=http://ollama:11434
       - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
@@ -227,6 +253,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
@@ -236,5 +264,6 @@ volumes:
   insightface-models:
   auth-data:
   snapshot-data:
+  ollama-models:
 
 

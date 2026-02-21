@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision Labs — AI Assistant</title>
+    <meta name="description" content="AI-powered security assistant for Vision Labs">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="ai.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body class="ai-page">
+    <!-- Navbar -->
+    <nav class="navbar">
+        <a class="navbar-brand" href="/">
+            <span class="logo-icon">◉</span>
+            Vision Labs
+        </a>
+        <div class="navbar-links">
+            <a href="/">🏠 Home</a>
+            <a href="/ai.html" class="active">🤖 AI</a>
+        </div>
+    </nav>
+
+    <!-- Onboarding Wizard (shown when AI not enabled) -->
+    <div id="wizardContainer" class="wizard-container" style="display: none;">
+        <!-- Step 1: Welcome -->
+        <div id="wizardStep1" class="wizard-card">
+            <span class="wizard-icon">🤖</span>
+            <h2>AI Assistant</h2>
+            <p>
+                Activate your personal AI assistant. It runs entirely on your hardware —
+                no data ever leaves this machine. Ask about security events, set reminders,
+                or just chat.
+            </p>
+            <div class="wizard-actions">
+                <button class="btn-primary" onclick="wizardNext(2)">Enable AI Assistant</button>
+            </div>
+        </div>
+
+        <!-- Step 2: User name -->
+        <div id="wizardStep2" class="wizard-card" style="display: none;">
+            <span class="wizard-icon">👋</span>
+            <h2>What should I call you?</h2>
+            <p>Give me a name to use, or skip and I'll just say "hey".</p>
+            <input type="text" class="wizard-input" id="userName" placeholder="Your name..." maxlength="30"
+                autocomplete="off">
+            <div class="wizard-actions">
+                <button class="btn-secondary" onclick="wizardNext(3)">Skip</button>
+                <button class="btn-primary" onclick="wizardNext(3)">Continue</button>
+            </div>
+        </div>
+
+        <!-- Step 3: AI name -->
+        <div id="wizardStep3" class="wizard-card" style="display: none;">
+            <span class="wizard-icon">✨</span>
+            <h2>Name your assistant</h2>
+            <p>Pick a suggestion or type your own name for me.</p>
+            <div class="name-suggestions">
+                <button class="name-chip" onclick="selectAIName(this, 'Atlas')">Atlas</button>
+                <button class="name-chip" onclick="selectAIName(this, 'Sentinel')">Sentinel</button>
+                <button class="name-chip" onclick="selectAIName(this, 'Iris')">Iris</button>
+                <button class="name-chip" onclick="selectAIName(this, 'Nova')">Nova</button>
+                <button class="name-chip" onclick="selectAIName(this, 'Sage')">Sage</button>
+            </div>
+            <input type="text" class="wizard-input" id="aiName" placeholder="Or type a custom name..." maxlength="30"
+                autocomplete="off">
+            <div class="wizard-actions">
+                <button class="btn-secondary" onclick="wizardNext(2)">Back</button>
+                <button class="btn-primary" onclick="finishWizard()">Activate</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chat Interface (shown when AI is enabled) -->
+    <div id="chatContainer" class="chat-container" style="display: none;">
+        <!-- Chat header -->
+        <div class="chat-header">
+            <div class="ai-avatar" id="aiAvatar">🤖</div>
+            <div class="chat-header-info">
+                <h3 id="aiNameDisplay">Atlas</h3>
+                <span>Local AI · Qwen 3 14B</span>
+            </div>
+            <div class="chat-status-dot"></div>
+        </div>
+
+        <!-- Error banner -->
+        <div class="ai-error" id="aiError"></div>
+
+        <!-- Messages -->
+        <div class="chat-messages" id="chatMessages">
+            <!-- Messages rendered by JS -->
+        </div>
+
+        <!-- Input -->
+        <div class="chat-input-area">
+            <div class="chat-input-wrapper">
+                <textarea id="chatInput" placeholder="Ask me anything..." rows="1" autofocus></textarea>
+                <button id="sendBtn" onclick="sendMessage()" title="Send">↑</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="ai.js"></script>
+</body>
+
+</html>
