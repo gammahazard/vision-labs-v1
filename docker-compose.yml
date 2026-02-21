@@ -1,8 +1,9 @@
-# docker-compose.yml — Vision Labs (Phases 0-5)
+# docker-compose.yml — Vision Labs (Phases 0-7)
 #
 # PURPOSE:
 #   Runs the full Vision Labs stack on a single PC (RTX 3090):
-#   Redis, camera ingester, YOLO pose detector, tracker, face recognizer, dashboard.
+#   Redis, camera ingester, YOLO pose detector, vehicle detector, tracker,
+#   face recognizer, dashboard, and Ollama (local LLM).
 #
 # USAGE:
 #   docker compose up --build          # Start everything (first time)
@@ -34,7 +35,7 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru --auto-aof-rewrite-min-size 64mb
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
@@ -85,11 +86,11 @@ services:
       - CAMERA_ID=front_door
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - MODEL_NAME=yolov8s-pose.pt
+      - MODEL_NAME=/models/yolov8s-pose.pt
       - CONFIDENCE_THRESH=0.5
     volumes:
       - ./contracts:/app/contracts:ro
-      - yolo-models:/root/.cache
+      - yolo-models:/models
     deploy:
       resources:
         reservations:
@@ -176,12 +177,12 @@ services:
       - CAMERA_ID=front_door
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - MODEL_NAME=yolov8s.pt
+      - MODEL_NAME=/models/yolov8s.pt
       - CONFIDENCE_THRESH=0.4
       - FRAME_SKIP=3
     volumes:
       - ./contracts:/app/contracts:ro
-      - yolo-models:/root/.cache
+      - yolo-models:/models
     deploy:
       resources:
         reservations:

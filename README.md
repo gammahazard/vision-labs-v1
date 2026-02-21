@@ -18,7 +18,8 @@ An event-driven, microservices-based security camera system that detects people,
 | **Zone-based alerting** | Draw polygonal zones on the camera view, set time-based alert rules (always, night only, dead zone) |
 | **Telegram notifications** | Real-time photo alerts when people are detected or identified |
 | **Vehicle detection** | YOLOv8s detects cars, trucks, buses, motorcycles — snapshot + event feed |
-| **Self-learning** *(coming soon)* | User feedback trains an alert scoring model -- fewer false alarms over time |
+| **Self-learning** | User feedback trains suppression rules — fewer false alarms over time |
+| **AI assistant** | Local Qwen 3 14B via Ollama — 18 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules |
 
 ---
 
@@ -33,9 +34,10 @@ Ingester --> Redis Streams --> YOLO Pose Detector --> Tracker --> Events
                            --> InsightFace --> Face Identity
                            --> Dashboard (WebSocket --> Browser)
                            --> Telegram Notifications
+                           --> Ollama (Qwen 3 14B) --> AI Chat
 ```
 
-Seven containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
+Eight containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
 
 | Service | Purpose | GPU? |
 |---------|---------|------|
@@ -46,6 +48,7 @@ Seven containerized services communicate through Redis Streams -- no direct inte
 | **vehicle-detector** | YOLOv8s vehicle detection (car/truck/bus/motorcycle) | Yes |
 | **face-recognizer** | InsightFace embedding + enrollment API | Yes |
 | **dashboard** | FastAPI + WebSocket + static frontend | No |
+| **ollama** | Local LLM inference (Qwen 3 14B) | Yes |
 
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive -- service internals, Redis key map, data flow diagrams, and design decisions.
 
@@ -208,32 +211,32 @@ When configured with a Telegram bot token, the system sends real-time alerts wit
 
 ---
 
-## Self-Learning Feedback Loop (Phase 6.5 -- Coming Next)
+## Self-Learning Feedback Loop (Phase 6.5)
 
 This is the core differentiator: **the system starts by alerting on everything, then learns from your feedback to filter noise.**
 
 ### The Three Stages
 
 | Stage | When | Behavior | Notifications |
-|-------|------|----------|---------------|
+|-------|------|----------|--------------|
 | **Observer** | Week 1-2 | Alerts on everything, asks for feedback | ~15-20/day |
 | **Suggest** | Week 3-4 | Auto-suppresses obvious noise, asks about ambiguous | ~3-5/day |
 | **Autonomous** | Month 2+ | Only alerts on events you've historically cared about | ~0-2/day |
 
 ### What It Learns
 
-A lightweight scoring model (logistic regression -- no GPU needed) trains on ~12 features already available in the pipeline:
+A deterministic suppression rule engine builds rules from your feedback patterns:
 
-- YOLO confidence, identity (known vs unknown), zone name, time period, action type
-- Duration on screen, hour of day, day of week, bounding box area, number of people
+- **Identity-based rules** -- after 3+ false alarms for the same person (e.g., "Mail Carrier"), auto-suppress future alerts
+- **Zone + time rules** -- after 5+ false alarms in the same zone at the same time of day, auto-suppress
 
 ### How You Teach It
 
 - **Telegram inline buttons** on every notification: Real Alert / Not Needed / Tag (delivery, neighbor, shadow)
 - **Dashboard review queue** for batch approve/reject with thumbnails
-- The system tracks its own accuracy ("of the last 50 alerts I sent, user confirmed 45") and advances stages when accuracy > 90%
+- **AI-triggered retrain** -- ask the AI assistant to retrain the suppression model at any time
 
-> **No YOLO or InsightFace retraining.** Those are frozen foundation models. The scoring model is a thin decision layer on top that learns your personal alert preferences.
+> **No YOLO or InsightFace retraining.** Those are frozen foundation models. The suppression engine is a thin decision layer on top that learns your personal alert preferences.
 
 ---
 
@@ -250,17 +253,17 @@ A lightweight scoring model (logistic regression -- no GPU needed) trains on ~12
 | Phase 6 | Zone editor + time-based alert rules + Telegram notifications | Done |
 | Phase 6.1 | Dashboard authentication (login, sessions, password change) | Done |
 | Phase 6.2 | Vehicle detection (car/truck/bus/motorcycle) + event feed | Done |
-| **Phase 6.5** | **Self-learning feedback loop (Telegram buttons, review queue, scoring)** | **Next** |
-| Phase 7 | LLM brain -- Ollama + Mistral 7B for event narration, daily summaries, chat | Planned |
+| Phase 6.5 | Self-learning feedback loop (Telegram buttons, review queue, suppression rules) | Done |
+| Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 18 tools | Done |
 | Phase 8 | OpenPLC integration -- Modbus TCP bridge, ladder logic decisions | Planned |
 
-### Phase 7: LLM Brain (Planned)
+### Phase 7: AI Assistant (Done)
 
-A local Mistral 7B model (via Ollama) adds natural language capabilities:
-- **Event narration** -- turns raw JSON into "An unrecognized person approached your front door at 2:15 PM and stood there for 30 seconds"
-- **Daily/weekly summaries** -- "Tuesday: 24 people detected, 1 package delivery, 0 overnight events"
-- **Chat interface** -- "Did anyone come to my door while I was at work?" queries the event database and answers conversationally
-- **Review assistant** -- pre-labels events: "Likely mail carrier -- timing matches daily pattern"
+A local Qwen 3 14B model (via Ollama, ~9.3 GB) adds natural language capabilities:
+- **Chat interface** -- dark-themed UI with onboarding wizard, suggestion chips, markdown + inline image rendering
+- **18 tools** -- query events/events by date/patterns, faces/unknowns, live scene, capture snapshot (with weather + scene description), capture 5-second video clip in chat, get weather, browse vehicles, zones, notification history, feedback stats, review feedback, retrain rules, send Telegram (text/snapshot/clip), schedule reminders, system status
+- **Runs entirely on-device** -- no cloud APIs, no data leaves the machine
+- **Extensibility roadmap** -- see ARCHITECTURE.md for 3-tier plan (smarter context → proactive intelligence → autonomous operation)
 
 ### Phase 8: OpenPLC (Planned)
 
@@ -303,11 +306,10 @@ Bridges AI detections to industrial PLC ladder logic:
 | YOLOv8s-pose | ~500 MB |
 | YOLOv8s (vehicles) | ~500 MB |
 | InsightFace buffalo_l | ~600 MB |
-| **Current total** | **~1.6 GB** |
-| + Mistral 7B Q4 (Phase 7) | +4,500 MB |
-| **Future total** | **~6.1 GB** |
+| Qwen 3 14B (Ollama) | ~9,300 MB |
+| **Current total** | **~10.9 GB** |
 
-Fits comfortably on any modern NVIDIA GPU (4GB+ for current, 8GB+ with LLM).
+Fits on any 12GB+ NVIDIA GPU. The RTX 3090 (24 GB) has ~13 GB headroom.
 
 ---
 
@@ -316,7 +318,7 @@ Fits comfortably on any modern NVIDIA GPU (4GB+ for current, 8GB+ with LLM).
 ```
 vision-labs/
 |-- .env.example                  # Environment template (copy to .env)
-|-- docker-compose.yml            # All 7 services orchestrated
+|-- docker-compose.yml            # All 8 services orchestrated
 |-- ARCHITECTURE.md               # Full technical deep dive
 |-- v2.md                         # Phased build plan with design rationale
 |
@@ -334,13 +336,19 @@ vision-labs/
 |   |-- vehicle-detector/         # YOLOv8s vehicle detection (GPU)
 |   +-- dashboard/                # FastAPI backend + static frontend
 |       |-- server.py             # App factory, WebSocket handler, middleware
-|       |-- routes/               # Modular API endpoints (events, faces, zones, auth, etc.)
+|       |-- feedback_db.py        # Feedback + suppression rules (SQLite)
+|       |-- ai_db.py              # AI config + reminders + chat history (SQLite)
+|       |-- routes/               # Modular API endpoints (events, faces, zones, auth, feedback, ai)
 |       +-- static/               # HTML/JS/CSS (no build step, no framework)
+|           |-- index.html         # Dashboard (live feed, sidebar panels)
+|           |-- ai.html            # AI assistant (onboarding wizard + chat)
+|           +-- login.html         # Authentication page
 |
 +-- tests/                        # Unit + integration tests (no GPU/Redis required)
     |-- test_actions.py           # Action classification from keypoints
     |-- test_time_rules.py        # Sunrise/sunset + time period logic
     |-- test_face_db.py           # Face database operations
+    |-- test_feedback_db.py       # Feedback + suppression rule tests
     |-- test_tracker.py           # IoU matching + person tracking
     |-- test_routes.py            # Dashboard API endpoint tests
     +-- test_vehicles.py          # Vehicle pipeline tests

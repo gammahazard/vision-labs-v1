@@ -11,6 +11,7 @@
 let aiConfig = { enabled: false, user_name: '', ai_name: 'Atlas' };
 let chatHistory = [];  // { role: 'user'|'assistant', content: string }
 let isWaiting = false;
+let ollamaReady = false;
 
 // ---------------------------------------------------------------------------
 // Init
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (aiConfig.enabled) {
         showChat();
         loadHistory();
+        checkOllamaStatus();
     } else {
         showWizard();
     }
@@ -110,6 +112,72 @@ async function finishWizard() {
         : `Hey! I'm ${aiName}. I'm your local AI assistant running right on your hardware. Ask me about security events, set reminders, or just chat. What's on your mind?`;
 
     addMessage('assistant', greeting);
+    checkOllamaStatus();
+}
+
+// ---------------------------------------------------------------------------
+// Ollama readiness polling
+// ---------------------------------------------------------------------------
+async function checkOllamaStatus() {
+    const overlay = document.getElementById('ollamaOverlay');
+    const statusEl = document.getElementById('ollamaStatus');
+    const sendBtn = document.getElementById('sendBtn');
+    const input = document.getElementById('chatInput');
+
+    // Show overlay immediately
+    if (overlay) overlay.style.display = 'flex';
+    if (sendBtn) sendBtn.disabled = true;
+    if (input) input.placeholder = 'Waiting for AI model...';
+
+    const statusMessages = {
+        offline: 'Connecting to Ollama...',
+        not_found: 'Model not found — downloading may be in progress...',
+        loading: 'Loading Qwen 3 14B into GPU memory...',
+        ready: 'Ready!',
+    };
+
+    const startTime = Date.now();
+    const MAX_WAIT_MS = 120_000; // 2 minutes hard fallback
+
+    const dismissOverlay = () => {
+        ollamaReady = true;
+        if (sendBtn) sendBtn.disabled = false;
+        if (input) input.placeholder = 'Ask me anything...';
+        if (overlay) {
+            overlay.style.transition = 'opacity 0.5s';
+            overlay.style.opacity = '0';
+            setTimeout(() => { overlay.style.display = 'none'; }, 500);
+        }
+        // Re-fetch history to pick up warm-up messages saved after initial load
+        loadHistory();
+    };
+
+    const poll = async () => {
+        // Hard fallback — dismiss after 2 minutes regardless
+        if (Date.now() - startTime > MAX_WAIT_MS) {
+            console.warn('AI model status check timed out after 2 minutes — dismissing overlay');
+            if (statusEl) statusEl.textContent = 'Timed out — try chatting anyway';
+            dismissOverlay();
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/ai/status');
+            if (resp.ok) {
+                const data = await resp.json();
+                if (statusEl) statusEl.textContent = statusMessages[data.status] || data.status;
+                if (data.model_ready) {
+                    if (statusEl) statusEl.textContent = 'Ready!';
+                    dismissOverlay();
+                    return; // Stop polling
+                }
+            }
+        } catch (e) {
+            if (statusEl) statusEl.textContent = 'Connecting to Ollama...';
+        }
+        setTimeout(poll, 3000);
+    };
+    poll();
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +239,17 @@ function addMessage(role, content) {
 
 function appendMessageElement(role, content, animate) {
     const container = document.getElementById('chatMessages');
+
+    // System messages: centered, muted, no avatar
+    if (role === 'system') {
+        const sysDiv = document.createElement('div');
+        sysDiv.className = 'message-system';
+        if (!animate) sysDiv.style.animation = 'none';
+        sysDiv.innerHTML = renderMarkdown(content);
+        container.appendChild(sysDiv);
+        return;
+    }
+
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${role}`;
     if (!animate) msgDiv.style.animation = 'none';
@@ -226,6 +305,10 @@ function scrollToBottom() {
 // ---------------------------------------------------------------------------
 async function sendMessage() {
     if (isWaiting) return;
+    if (!ollamaReady) {
+        showError('AI model is still loading. Please wait...');
+        return;
+    }
 
     const input = document.getElementById('chatInput');
     const message = input.value.trim();
@@ -233,6 +316,7 @@ async function sendMessage() {
 
     // Add user message
     addMessage('user', message);
+    hideSuggestions();
     input.value = '';
     input.style.height = 'auto';
 
@@ -295,25 +379,106 @@ function hideError() {
 function renderMarkdown(text) {
     if (!text) return '';
 
+    // Process line-by-line for proper list handling
+    const lines = text.split('\n');
+    let html = '';
+    let inUl = false, inOl = false;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+
+        // Unordered list item
+        if (/^[-*]\s+/.test(trimmed)) {
+            if (inOl) { html += '</ol>'; inOl = false; }
+            if (!inUl) { html += '<ul>'; inUl = true; }
+            html += `<li>${inlineFormat(trimmed.replace(/^[-*]\s+/, ''))}</li>`;
+            continue;
+        }
+        // Ordered list item
+        if (/^\d+\.\s+/.test(trimmed)) {
+            if (inUl) { html += '</ul>'; inUl = false; }
+            if (!inOl) { html += '<ol>'; inOl = true; }
+            html += `<li>${inlineFormat(trimmed.replace(/^\d+\.\s+/, ''))}</li>`;
+            continue;
+        }
+
+        // Close any open list
+        if (inUl) { html += '</ul>'; inUl = false; }
+        if (inOl) { html += '</ol>'; inOl = false; }
+
+        // Empty line = paragraph break
+        if (!trimmed) {
+            html += '<br>';
+            continue;
+        }
+
+        // Image line: ![alt](url)
+        if (/^!\[.*?\]\(.*?\)$/.test(trimmed)) {
+            if (inUl) { html += '</ul>'; inUl = false; }
+            if (inOl) { html += '</ol>'; inOl = false; }
+            const match = trimmed.match(/^!\[(.*)\]\((.+)\)$/);
+            if (match) {
+                html += `<div class="chat-image"><img src="${match[2]}" alt="${match[1]}" style="max-width:100%;border-radius:8px;margin:8px 0;"><div class="chat-image-caption">${match[1]}</div></div>`;
+                continue;
+            }
+        }
+
+        // Video tag pass-through (injected by capture_clip tool)
+        if (trimmed.startsWith('<video')) {
+            html += trimmed;
+            continue;
+        }
+
+        // Normal paragraph line
+        html += `<p>${inlineFormat(trimmed)}</p>`;
+    }
+
+    if (inUl) html += '</ul>';
+    if (inOl) html += '</ol>';
+
+    // Clean up double breaks and empty paragraphs
+    return html.replace(/<p><\/p>/g, '').replace(/(<br>){3,}/g, '<br><br>');
+}
+
+function inlineFormat(text) {
     return text
-        // Code blocks
-        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
+        // Code blocks (triple backtick — shouldn't appear inline but handle gracefully)
+        .replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
         // Inline code
         .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // Inline images: ![alt](url)
+        .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;margin:4px 0;">')
         // Bold
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         // Italic
-        .replace(/\*(.+?)\*/g, '<em>$1</em>')
-        // Line breaks — double newline = paragraph
-        .replace(/\n\n/g, '</p><p>')
-        // Single newline = br
-        .replace(/\n/g, '<br>')
-        // Wrap in paragraph
-        .replace(/^(.+)$/s, '<p>$1</p>')
-        // Unordered lists
-        .replace(/<br>- /g, '</p><ul><li>')
-        .replace(/<li>([^<]*)/g, '<li>$1</li>')
-        // Clean up
-        .replace(/<\/li><\/p>/g, '</li></ul>')
-        .replace(/<p><\/p>/g, '');
+        .replace(/\*(.+?)\*/g, '<em>$1</em>');
+}
+
+// ---------------------------------------------------------------------------
+// Suggestion chips
+// ---------------------------------------------------------------------------
+function useSuggestion(chip) {
+    const text = chip.textContent.replace(/^[\u{1F300}-\u{1FAD6}\u{2600}-\u{27BF}]\s*/u, '').trim();
+    const input = document.getElementById('chatInput');
+    input.value = text;
+    input.focus();
+    sendMessage();
+}
+
+function hideSuggestions() {
+    const el = document.getElementById('suggestionChips');
+    if (el) el.style.display = 'none';
+}
+
+// ---------------------------------------------------------------------------
+// Reset
+// ---------------------------------------------------------------------------
+async function resetAssistant() {
+    if (!confirm('Reset AI assistant? This will clear your chat history and re-open the setup wizard.')) return;
+    try {
+        await fetch('/api/ai/reset', { method: 'POST' });
+    } catch (e) {
+        console.warn('Reset failed:', e);
+    }
+    location.reload();
 }

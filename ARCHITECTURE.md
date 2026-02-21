@@ -1,7 +1,7 @@
 # Vision Labs — Architecture Reference
 
-> **Last updated:** Feb 20, 2026
-> **Status:** Phases 0–6.2 complete. Next: Phase 6.5 (Self-Learning Feedback Loop).
+> **Last updated:** Feb 21, 2026
+> **Status:** Phases 0–7 complete. 18-tool AI assistant. Next: Phase 8 (OpenPLC).
 > **Hardware:** RTX 3090 PC, Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
 
 This document is the definitive reference for how the system works. If you lose context, start here.
@@ -26,9 +26,10 @@ This document is the definitive reference for how the system works. If you lose 
 14. [Docker Infrastructure](#docker-infrastructure)
 15. [Test Suite](#test-suite)
 16. [Current Status vs v2.md Plan](#current-status-vs-v2md-plan)
-17. [Next Phase: 6.5 Self-Learning](#next-phase-65-self-learning)
+17. [Phase 6.5: Self-Learning](#phase-65-self-learning-feedback-loop-implemented)
 18. [Modularity & Security Principles](#modularity--security-principles)
-19. [File Index](#file-index)
+19. [Extensibility Roadmap](#extensibility-roadmap)
+20. [File Index](#file-index)
 
 ---
 
@@ -48,7 +49,7 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
 - **Loose coupling:** Services communicate only via Redis streams/hashes — no direct calls (except dashboard → face-recognizer HTTP proxy)
 - **Hot-reload:** Config changes from the dashboard propagate via Redis — no restarts needed
 - **Fault isolation:** Any service can crash without taking down the pipeline
-- **GPU budget:** YOLOv8s-pose (~500MB) + YOLOv8s vehicles (~500MB) + InsightFace buffalo_l (~600MB) = ~1.6GB of 24GB VRAM
+- **GPU budget:** YOLOv8s-pose (~500 MB) + YOLOv8s vehicles (~500 MB) + InsightFace buffalo_l (~600 MB) + Qwen 3 14B (~9.3 GB) = ~10.9 GB of 24 GB VRAM
 
 ---
 
@@ -117,6 +118,7 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
 | **vehicle-detector** | vision-labsv1-vehicle-detector-1 | — | Yes | YOLOv8s vehicle detection |
 | **face-recognizer** | vision-labsv1-face-recognizer-1 | 8081 | Yes | InsightFace embedding + REST API |
 | **dashboard** | vision-labsv1-dashboard-1 | 8080 | No | FastAPI + WebSocket + static frontend |
+| **ollama** | vision-labsv1-ollama-1 | 11434 | Yes | Local LLM inference (Qwen 3 14B) |
 
 ---
 
@@ -136,6 +138,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `identity_state:{camera_id}` | Hash | face-recognizer | tracker, dashboard | `{identities: JSON[{name, bbox, confidence}]}` |
 | `detections:vehicle:{camera_id}` | Stream | vehicle-detector | tracker | `{detections: JSON[{bbox, confidence, class_name, class_id}], detector_type: "vehicle", inference_ms, frame_bytes}` |
 | `vehicle_snapshot:{camera_id}:{ts}` | String (TTL 24h) | tracker | dashboard | Raw JPEG bytes |
+| `frame_hd:{camera_id}` | String (TTL 2s) | camera-ingester (HD thread) | dashboard (HD toggle) | Raw JPEG bytes of main stream frame |
 
 **Default camera_id:** `front_door`
 
@@ -252,9 +255,9 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### camera-ingester (`services/camera-ingester/ingester.py`)
 
-**280 lines.** Single file, no dependencies beyond OpenCV + Redis.
+**~364 lines.** Single file, no dependencies beyond OpenCV + Redis.
 
-- **RTSP connection:** Uses sub-stream (640×480) for low bandwidth
+- **RTSP connection:** Uses sub-stream (640×480) for AI inference; optional HD thread reads main stream and caches latest frame in Redis for a live HD toggle
 - **Frame throttling:** `cap.grab()` discards frames between captures to hit TARGET_FPS
 - **Stream capping:** `XADD ... MAXLEN 1000` prevents Redis from growing unbounded
 - **Reconnect:** Exponential backoff (1s → 2s → 4s → ... → 30s max) on RTSP failure
@@ -263,7 +266,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### pose-detector (`services/pose-detector/detector.py`)
 
-**346 lines.** GPU service.
+**~346 lines.** GPU service.
 
 - **Model:** YOLOv8s-pose (auto-downloaded on first run, cached in Docker volume `yolo-models`)
 - **Consumer group:** `pose_detectors` — can run multiple instances for load balancing
@@ -274,7 +277,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### vehicle-detector (`services/vehicle-detector/detector.py`)
 
-**270 lines.** GPU service. Mirrors pose-detector architecture.
+**~309 lines.** GPU service. Mirrors pose-detector architecture.
 
 - **Model:** YOLOv8s (general object detection, auto-downloaded, cached in Docker volume `yolo-models`)
 - **Consumer group:** `vehicle_detectors` — reads from same frame stream as pose-detector
@@ -286,7 +289,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### tracker (`services/tracker/tracker.py`)
 
-**640 lines.** CPU-only, most complex service.
+**~878 lines.** CPU-only, most complex service.
 
 **Core algorithm:**
 - Maintains a dict of `TrackedPerson` objects, each with: person_id, bbox, first_seen, last_seen, action, action_history, confirmed (bool)
@@ -317,7 +320,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### face-recognizer (`services/face-recognizer/recognizer.py` + `face_db.py`)
 
-**730 + 474 lines.** GPU service + SQLite DB + REST API.
+**~732 + ~463 lines.** GPU service + SQLite DB + REST API.
 
 **Dual role:**
 1. **Background loop** — reads detections, crops faces, matches embeddings, publishes identities
@@ -352,7 +355,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### Backend (`services/dashboard/server.py`)
 
-**~765 lines.** FastAPI with modular routes.
+**~918 lines.** FastAPI with modular routes.
 
 **Startup sequence:**
 1. Initialize auth SQLite database (create default admin/admin if empty)
@@ -386,6 +389,8 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `zones.py` | `GET /api/zones`, `POST /api/zones`, `PUT /api/zones/{id}`, `DELETE /api/zones/{id}` | Zone CRUD in Redis hash |
 | `notifications.py` | `GET /api/notifications/status`, `POST /api/notifications/test` | Telegram bot integration + feedback inline buttons |
 | `feedback.py` | `GET /api/feedback`, `GET /api/feedback/stats`, `GET /api/feedback/rules`, `POST /api/feedback/{event_id}`, `POST /api/feedback/rules/{id}/toggle`, `DELETE /api/feedback/rules/{id}` | Self-learning feedback CRUD + suppression rules |
+| `browse.py` | `GET /api/browse/days`, `GET /api/browse/days/{date}`, `GET /api/browse/snapshot/{date}/{filename}`, `GET /api/browse/faces` | Vehicle snapshot browser + enrolled faces gallery |
+| `ai.py` | `GET /api/ai/status`, `GET /api/ai/config`, `POST /api/ai/config`, `POST /api/ai/chat`, `GET /api/ai/history`, `DELETE /api/ai/history`, `POST /api/ai/reset`, `GET /api/ai/reminders`, `GET /api/ai/clip/{filename}` | AI assistant: Ollama chat + 18 tools (events, faces, unknowns, feedback, retrain, live scene, capture snapshot, capture clip, weather, event patterns, browse vehicles, zones, notification history, Telegram, reminders, status, review, events by date) |
 
 **Shared state pattern:** `routes/__init__.py` defines module-level variables (`r`, `logger`, `FACE_API_URL`, all stream keys). `server.py` sets these before importing routers. Each route module does `import routes as ctx` to access them.
 
@@ -495,7 +500,7 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 
 ### docker-compose.yml
 
-7 services, 6 named volumes:
+8 services, 7 named volumes:
 
 | Volume | Mount Point | Purpose |
 |--------|-------------|---------|
@@ -503,8 +508,9 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 | `face-data` | `/data` (face-recognizer) | SQLite face DB + unknowns |
 | `yolo-models` | `/root/.config/Ultralytics` | YOLOv8 model cache |
 | `insightface-models` | `/root/.insightface` | InsightFace buffalo_l cache |
-| `auth-data` | `/data` (dashboard) | Auth SQLite database |
+| `auth-data` | `/data` (dashboard) | Auth + feedback + AI SQLite databases |
 | `snapshot-data` | `/data/snapshots` (dashboard) | Event + vehicle snapshots (persists across container restarts) |
+| `ollama-models` | `/root/.ollama` (ollama) | Qwen 3 14B model weights (~9.3 GB) |
 
 ### Shared Contract Mounting
 
@@ -519,7 +525,7 @@ This ensures a single source of truth — change a stream key in `contracts/stre
 
 ### GPU Access
 
-`pose-detector` and `face-recognizer` use the NVIDIA runtime:
+`pose-detector`, `face-recognizer`, `vehicle-detector`, and `ollama` use the NVIDIA runtime:
 
 ```yaml
 deploy:
@@ -549,6 +555,7 @@ All tests in `tests/`. Run with: `pytest tests/ -v`
 | `test_actions.py` | `contracts/actions.py` | All 5 action classifications, edge cases, missing keypoints |
 | `test_time_rules.py` | `contracts/time_rules.py` | All 4 time periods, `should_alert()` matrix, `point_in_polygon()` edge cases |
 | `test_face_db.py` | `face_db.py` | Enroll, match, delete, unknowns, dedup, reconciliation, max limit |
+| `test_feedback_db.py` | `feedback_db.py` | Feedback records, suppression rules, retrain, auto-rule generation |
 | `test_tracker.py` | `tracker.py` | IoU computation, TrackedPerson state, PersonTracker.update(), debounce |
 | `test_routes.py` | `routes/*.py` | Dashboard API endpoints: zones, config, events, auth, notifications (mocked Redis) |
 | `test_vehicles.py` | Vehicle pipeline | Vehicle events, snapshot storage, idle detection, browse API |
@@ -568,41 +575,41 @@ All tests in `tests/`. Run with: `pytest tests/ -v`
 | **6: Zones + Alerts** | ✅ Complete | Zone drawing, time rules, dead zones, Telegram notifications. Remaining: event clip recording |
 | **6.1: Auth** | ✅ Complete | Login page, cookie sessions, change password |
 | **6.2: Vehicles** | ✅ Complete | YOLOv8s vehicle detection, snapshots, idle alerts, live overlay bboxes |
-| **6.5: Self-Learning** | 📋 NOT STARTED | Feedback DB, Telegram inline buttons, suppression engine, notification prefs |
-| **7: LLM Brain** | 📋 NOT STARTED | Ollama + Mistral 7B for narration, summaries, chat |
+| **6.5: Self-Learning** | ✅ Complete | Feedback DB, Telegram inline buttons, suppression rules, review queue, dashboard widget |
+| **7: AI Assistant** | ✅ Complete | Ollama + Qwen 3 14B, onboarding wizard, chat UI, 18 tools (query events/faces/unknowns/feedback/patterns, live scene, capture snapshot with weather+scene description, capture 5-second video clip in chat, weather, browse vehicles/zones/notification history, retrain rules, send Telegram, schedule reminders, system status) |
 | **8: OpenPLC** | 📋 NOT STARTED | Modbus bridge, ladder logic automation |
 
 **Minor remaining from Phase 6:** Event clip recording (10s clips around detections, saved to QNAP via FTP/NFS).
 
 ---
 
-## Next Phase: 6.5 Self-Learning
+## Phase 6.5: Self-Learning Feedback Loop (Implemented)
 
 ### What it adds
 
-An alert scoring engine that learns from user feedback over time, reducing false notifications from ~15/day to ~2/day.
+An alert suppression engine that learns from user feedback over time, reducing false notifications from ~15/day to ~2/day.
 
-### New components needed
+### Components built
 
-1. **Feedback SQLite table** — stores event features + user verdict (real alert / not needed / tag)
-2. **Telegram inline buttons** — ✅/❌/🏷️ on notifications, callbacks store feedback via webhook
-3. **Dashboard review queue** — batch UI for reviewing unreviewed events with thumbnails
-4. **Alert scoring engine** — logistic regression/random forest on ~12 input features from existing pipeline
-5. **Autonomy tracker** — dashboard widget showing stage (Observer → Suggest → Autonomous) + accuracy
+1. **`feedback_db.py`** — SQLite database for feedback records + suppression rules
+2. **`routes/feedback.py`** — REST API for viewing feedback, managing rules, submitting verdicts
+3. **Telegram inline buttons** — ✅/❌/🏷️ on notifications, callbacks store feedback
+4. **Suppression rules** — auto-generated when patterns exceed thresholds (3 identity false alarms, 5 zone+time false alarms)
+5. **AI retrain tool** — the AI assistant can re-scan all feedback and regenerate rules on demand
+6. **`feedback.js`** — dashboard review queue UI
 
 ### How it stays modular
 
-- Scoring engine is a **pure function** `compute_alert_score(event_features) → float` — no Redis coupling
+- Suppression engine is a **pure function** `should_suppress(identity, zone, time_period)` — no Redis coupling
 - Feedback storage is a **separate SQLite DB** (not mixed with face DB or auth DB)
-- Review queue is a **new routes module** (`routes/review.py`) — follows existing pattern
+- Review queue is a **new routes module** (`routes/feedback.py`) — follows existing pattern
 - Telegram inline buttons use Telegram's callback_query API — existing `notifications.py` extended
-- All existing services remain **unchanged** — scoring happens in the tracker before `XADD` events
+- All existing services remain **unchanged** — suppression happens in the tracker before `XADD` events
 
 ### How it stays secure
 
-- Feedback data never leaves the local machine
 - No retraining of YOLO/InsightFace (those are frozen foundation models)
-- Scoring model is tiny (logistic regression) — trains in milliseconds, no GPU needed
+- Suppression model is deterministic (threshold-based) — trains instantly, no GPU needed
 - Review queue protected by existing auth middleware
 
 ---
@@ -641,6 +648,45 @@ An alert scoring engine that learns from user feedback over time, reducing false
 
 ---
 
+## Extensibility Roadmap
+
+### Tier 1 — Make It Smarter (low effort, high impact)
+
+| Feature | Effort | Impact | Description |
+|---------|--------|--------|-------------|
+| **Weather + time in system prompt** | 🟢 Low | 🟢 High | ✅ Done. Conditions data and current time already injected into AI context. Snapshot tool includes weather. |
+| **Recent events in context** | 🟢 Low | 🟢 High | Pre-load last 5 events into system prompt so AI can proactively mention recent activity without tool calls |
+| **Daily briefing** | 🟡 Medium | 🟢 High | Scheduled Telegram summary: "Today: 12 events, 3 unknowns, busiest at 2pm, clear weather" |
+| **Rule suggestions** | 🟡 Medium | 🟢 High | AI proactively suggests suppression rules after seeing false alarm patterns |
+
+### Tier 2 — Proactive Intelligence
+
+| Feature | Effort | Impact | Description |
+|---------|--------|--------|-------------|
+| **Anomaly detection** | 🔴 High | 🟢 High | Track "normal" patterns and flag deviations (e.g., "John usually arrives by 5pm — not home yet") |
+| **Event correlation** | 🟡 Medium | 🟡 Medium | "Person appeared → 30s later → vehicle" = likely delivery, auto-label as routine |
+| **Auto-escalation** | 🟡 Medium | 🟢 High | Multiple unknowns in dead zone during night → high-priority Telegram without waiting for user query |
+| **Conversation memory** | 🟡 Medium | 🟡 Medium | AI remembers preferences ("always alert for driveway") persisted in ai_db |
+
+### Tier 3 — Truly Autonomous
+
+| Feature | Effort | Impact | Description |
+|---------|--------|--------|-------------|
+| **Multi-camera reasoning** | 🔴 High | 🟢 High | Correlate front + back camera: track movement through property |
+| **Voice integration** | 🟡 Medium | 🟡 Medium | Expose AI via API so Home Assistant or custom voice assistant can query it |
+| **NAS recording** | 🟢 Low | 🟢 High | QNAP FTP/NFS for continuous recording + event clip storage (weeks of history) |
+| **Event clip recording** | 🟡 Medium | 🟢 High | 10-second clips around detections, saved alongside snapshots |
+
+### Architecture Scaling Limits
+
+With the current architecture, the system can reasonably scale to:
+- **3–4 cameras** (limited by GPU VRAM: YOLO + InsightFace + Qwen compete for 24 GB)
+- **30-day event history** (Redis memory; beyond that, offload to PostgreSQL)
+- **50+ suppression rules** (deterministic engine scales linearly)
+- **20+ AI tools** (no performance degradation with current Ollama setup)
+
+---
+
 ## File Index
 
 ```
@@ -650,7 +696,7 @@ vision-labsv1/
 ├── .gitignore                    # Python, Docker, IDE ignores
 ├── ARCHITECTURE.md               # THIS FILE
 ├── README.md                     # Project overview
-├── docker-compose.yml            # All 7 services + 6 volumes
+├── docker-compose.yml            # All 8 services + 7 volumes
 ├── v1.md                         # Original brainstorm (79KB)
 ├── v2.md                         # Refined build plan (47KB)
 │
@@ -663,55 +709,71 @@ vision-labsv1/
 ├── services/
 │   ├── camera-ingester/
 │   │   ├── Dockerfile
-│   │   ├── ingester.py           # RTSP → Redis (280 lines)
+│   │   ├── ingester.py           # RTSP → Redis (~364 lines)
 │   │   └── requirements.txt
 │   │
 │   ├── pose-detector/
 │   │   ├── Dockerfile
-│   │   ├── detector.py           # YOLOv8s-pose inference (346 lines)
+│   │   ├── detector.py           # YOLOv8s-pose inference (~346 lines)
 │   │   └── requirements.txt
 │   │
 │   ├── tracker/
 │   │   ├── Dockerfile
-│   │   ├── tracker.py            # IoU tracking + events (640 lines)
+│   │   ├── tracker.py            # IoU tracking + events (~878 lines)
 │   │   └── requirements.txt
 │   │
 │   ├── face-recognizer/
 │   │   ├── Dockerfile
-│   │   ├── recognizer.py         # InsightFace + REST API (730 lines)
-│   │   ├── face_db.py            # SQLite face database (474 lines)
+│   │   ├── recognizer.py         # InsightFace + REST API (~732 lines)
+│   │   ├── face_db.py            # SQLite face database (~463 lines)
+│   │   └── requirements.txt
+│   │
+│   ├── vehicle-detector/
+│   │   ├── Dockerfile
+│   │   ├── detector.py           # YOLOv8s vehicle detection
 │   │   └── requirements.txt
 │   │
 │   └── dashboard/
 │       ├── Dockerfile
-│       ├── server.py             # FastAPI + WebSocket (~765 lines)
+│       ├── server.py             # FastAPI + WebSocket (~919 lines)
+│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~557 lines)
+│       ├── ai_db.py              # AI config + reminders + chat history (SQLite, ~237 lines)
 │       ├── requirements.txt
 │       ├── routes/
 │       │   ├── __init__.py       # Shared state container
-│       │   ├── auth.py           # Login/logout/password (312 lines)
-│       │   ├── events.py         # Event feed + snapshot API (69 lines)
-│       │   ├── config.py         # Config + stats API (72 lines)
-│       │   ├── conditions.py     # Time + weather API (111 lines)
-│       │   ├── faces.py          # Face enrollment proxy (109 lines)
-│       │   ├── unknowns.py       # Unknown faces proxy (89 lines)
-│       │   ├── zones.py          # Zone CRUD API (110 lines)
-│       │   └── notifications.py  # Telegram integration (275 lines)
+│       │   ├── auth.py           # Login/logout/password
+│       │   ├── events.py         # Event feed + snapshot API
+│       │   ├── config.py         # Config + stats API
+│       │   ├── conditions.py     # Time + weather API
+│       │   ├── faces.py          # Face enrollment proxy
+│       │   ├── unknowns.py       # Unknown faces proxy
+│       │   ├── zones.py          # Zone CRUD API
+│       │   ├── notifications.py  # Telegram integration
+│       │   ├── feedback.py       # Feedback + suppression rules API
+│       │   ├── browse.py          # Vehicle snapshot browser + faces gallery
+│       │   └── ai.py             # AI assistant (Ollama chat + 18 tools, ~1229 lines)
 │       └── static/
 │           ├── index.html        # Main dashboard layout
+│           ├── ai.html           # AI assistant (onboarding + chat)
 │           ├── login.html        # Login page
 │           ├── style.css         # Full CSS (~34KB)
+│           ├── ai.css            # AI page styles
 │           ├── app.js            # Core + WebSocket + init
+│           ├── ai.js             # AI chat + wizard logic
 │           ├── auth.js           # Auth UI
 │           ├── events.js         # Event feed
 │           ├── faces.js          # Face enrollment wizard
 │           ├── unknowns.js       # Unknown faces gallery
 │           ├── conditions.js     # Conditions panel
-│           └── zones.js          # Zone editor + canvas
+│           ├── zones.js          # Zone editor + canvas
+│           ├── browse.js         # Vehicle snapshot browser
+│           └── feedback.js       # Feedback review queue
 │
 └── tests/
     ├── test_actions.py           # Action classifier tests
     ├── test_time_rules.py        # Time rules + PIP tests
     ├── test_face_db.py           # Face DB integration tests
+    ├── test_feedback_db.py       # Feedback + suppression tests
     ├── test_tracker.py           # Tracker algorithm tests
     ├── test_routes.py            # Dashboard API endpoint tests
     └── test_vehicles.py          # Vehicle pipeline tests

@@ -207,6 +207,103 @@ def get_latest_frame() -> bytes | None:
     return None
 
 
+async def send_video(video_bytes: bytes, caption: str = "") -> int:
+    """
+    Send a video (MP4) with optional caption to Telegram.
+    Returns the Telegram message_id (0 on failure).
+    """
+    if not is_configured():
+        logger.warning("Telegram not configured — skipping video notification")
+        return 0
+    try:
+        data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"}
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{TELEGRAM_API}/sendVideo",
+                data=data,
+                files={"video": ("clip.mp4", video_bytes, "video/mp4")},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Telegram sendVideo failed: {resp.status_code} {resp.text}")
+                return 0
+            result = resp.json().get("result", {})
+            return result.get("message_id", 0)
+    except Exception as e:
+        logger.warning(f"Telegram sendVideo error: {e}")
+        return 0
+
+
+def build_clip(duration: float = 5.0, fps: int = 10) -> bytes | None:
+    """
+    Capture frames from the Redis stream and encode as MP4 clip.
+    Collects frames for `duration` seconds at `fps` rate.
+    Returns MP4 bytes or None on failure.
+    """
+    import cv2
+    import numpy as np
+    import tempfile
+    import time as _time
+
+    try:
+        r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+        frames = []
+        target_count = int(duration * fps)
+        interval = 1.0 / fps
+        start = _time.monotonic()
+
+        for _ in range(target_count):
+            entries = r_bin.xrevrange(ctx.FRAME_STREAM.encode(), count=1)
+            if entries:
+                _, data = entries[0]
+                frame_bytes = data.get(b"frame")
+                if frame_bytes and len(frame_bytes) > 100:
+                    nparr = np.frombuffer(frame_bytes, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        frames.append(img)
+
+            # Wait for next frame
+            elapsed = _time.monotonic() - start
+            expected = len(frames) * interval
+            if expected > elapsed:
+                _time.sleep(expected - elapsed)
+
+            # Safety timeout
+            if _time.monotonic() - start > duration + 2:
+                break
+
+        if len(frames) < 5:
+            logger.warning(f"build_clip: only captured {len(frames)} frames, need at least 5")
+            return None
+
+        # Encode to MP4
+        h, w = frames[0].shape[:2]
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
+        for f in frames:
+            writer.write(f)
+        writer.release()
+
+        import os
+        with open(tmp_path, "rb") as f:
+            video_bytes = f.read()
+        os.unlink(tmp_path)
+
+        if len(video_bytes) < 1000:
+            logger.warning(f"build_clip: video too small ({len(video_bytes)} bytes)")
+            return None
+
+        return video_bytes
+
+    except Exception as e:
+        logger.warning(f"build_clip error: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Notify on person detection (rate-limited)
 # ---------------------------------------------------------------------------

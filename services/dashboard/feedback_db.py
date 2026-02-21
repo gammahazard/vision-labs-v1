@@ -297,6 +297,100 @@ class FeedbackDB:
         finally:
             conn.close()
 
+    def retrain_rules(self) -> dict:
+        """
+        Re-scan ALL feedback records and regenerate suppression rules.
+
+        Deletes all existing auto-generated rules and rebuilds them from
+        scratch based on current thresholds. Returns a summary of what
+        was created.
+        """
+        conn = self._get_conn()
+        try:
+            # Count existing rules before deletion
+            old_count = conn.execute(
+                "SELECT COUNT(*) FROM suppression"
+            ).fetchone()[0]
+
+            # Delete all existing auto-generated rules
+            conn.execute("DELETE FROM suppression")
+            conn.commit()
+            logger.info(f"Retrain: cleared {old_count} existing rules")
+
+            # --- Re-scan identity-based patterns ---
+            identity_rows = conn.execute("""
+                SELECT identity_label, COUNT(*) as cnt
+                FROM feedback
+                WHERE verdict = 'false_alarm'
+                  AND identity_label != ''
+                GROUP BY identity_label
+                HAVING cnt >= ?
+            """, (self.IDENTITY_THRESHOLD,)).fetchall()
+
+            new_identity = 0
+            for row in identity_rows:
+                conn.execute("""
+                    INSERT INTO suppression
+                        (rule_type, identity, min_false_alarms, created_at)
+                    VALUES ('identity', ?, ?, ?)
+                """, (row["identity_label"], row["cnt"], time.time()))
+                new_identity += 1
+
+            # --- Re-scan zone+time patterns ---
+            zone_rows = conn.execute("""
+                SELECT zone, time_period, COUNT(*) as cnt
+                FROM feedback
+                WHERE verdict = 'false_alarm'
+                  AND zone != '' AND time_period != ''
+                GROUP BY zone, time_period
+                HAVING cnt >= ?
+            """, (self.ZONE_TIME_THRESHOLD,)).fetchall()
+
+            new_zone_time = 0
+            for row in zone_rows:
+                conn.execute("""
+                    INSERT INTO suppression
+                        (rule_type, zone, time_period,
+                         min_false_alarms, created_at)
+                    VALUES ('zone_time', ?, ?, ?, ?)
+                """, (row["zone"], row["time_period"],
+                      row["cnt"], time.time()))
+                new_zone_time += 1
+
+            conn.commit()
+
+            # Get overall stats
+            total_feedback = conn.execute(
+                "SELECT COUNT(*) FROM feedback WHERE verdict != 'pending'"
+            ).fetchone()[0]
+            false_alarms = conn.execute(
+                "SELECT COUNT(*) FROM feedback WHERE verdict = 'false_alarm'"
+            ).fetchone()[0]
+            real_threats = conn.execute(
+                "SELECT COUNT(*) FROM feedback WHERE verdict = 'real_threat'"
+            ).fetchone()[0]
+
+            summary = {
+                "rules_cleared": old_count,
+                "identity_rules_created": new_identity,
+                "zone_time_rules_created": new_zone_time,
+                "total_new_rules": new_identity + new_zone_time,
+                "total_feedback_records": total_feedback,
+                "false_alarms": false_alarms,
+                "real_threats": real_threats,
+                "identity_threshold": self.IDENTITY_THRESHOLD,
+                "zone_time_threshold": self.ZONE_TIME_THRESHOLD,
+            }
+
+            logger.info(
+                f"Retrain complete: {new_identity} identity rules, "
+                f"{new_zone_time} zone+time rules "
+                f"(from {total_feedback} feedback records)"
+            )
+            return summary
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------
     # Auto-rule generation
     # ------------------------------------------------------------------

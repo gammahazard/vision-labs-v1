@@ -77,7 +77,8 @@ class AIDB:
                     message TEXT NOT NULL,
                     trigger_time REAL NOT NULL,
                     sent INTEGER NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL DEFAULT 0.0
+                    created_at REAL NOT NULL DEFAULT 0.0,
+                    media_type TEXT NOT NULL DEFAULT 'text'
                 );
 
                 CREATE TABLE IF NOT EXISTS chat_history (
@@ -88,6 +89,13 @@ class AIDB:
                 );
             """)
             conn.commit()
+
+            # Migrations — add columns that may not exist in older DBs
+            try:
+                conn.execute("ALTER TABLE reminders ADD COLUMN media_type TEXT NOT NULL DEFAULT 'text'")
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
         finally:
             conn.close()
 
@@ -132,13 +140,13 @@ class AIDB:
     # ------------------------------------------------------------------
     # Reminders
     # ------------------------------------------------------------------
-    def add_reminder(self, message: str, trigger_time: float) -> int:
+    def add_reminder(self, message: str, trigger_time: float, media_type: str = "text") -> int:
         """Schedule a new reminder. Returns the reminder ID."""
         conn = self._get_conn()
         try:
             cur = conn.execute(
-                "INSERT INTO reminders (message, trigger_time, created_at) VALUES (?, ?, ?)",
-                (message, trigger_time, time.time()),
+                "INSERT INTO reminders (message, trigger_time, created_at, media_type) VALUES (?, ?, ?, ?)",
+                (message, trigger_time, time.time(), media_type),
             )
             conn.commit()
             return cur.lastrowid

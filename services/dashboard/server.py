@@ -32,6 +32,7 @@ import os
 import time
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -168,7 +169,7 @@ from routes.notifications import router as notifications_router
 from routes.auth import router as auth_router, init_auth_db, validate_session
 from routes.browse import router as browse_router
 from routes.feedback import router as feedback_router, set_feedback_db
-from routes.ai import router as ai_router, set_ai_db, set_feedback_db as ai_set_feedback_db
+from routes.ai import router as ai_router, set_ai_db, set_feedback_db as ai_set_feedback_db, set_gpu_ready_flag
 
 app.include_router(events_router)
 app.include_router(config_router)
@@ -260,6 +261,7 @@ async def startup():
     asyncio.create_task(_reminder_poller(_ai_db))
 
     # Pull the AI model on first startup (background)
+    # Pass a callback so the warm-up can signal when the model is in GPU memory
     asyncio.create_task(_ensure_ollama_model())
 
     logger.info(f"Dashboard ready at http://localhost:{DASHBOARD_PORT}")
@@ -267,7 +269,10 @@ async def startup():
 
 async def _reminder_poller(ai_db):
     """Background task: check for due reminders every 60 seconds and send via Telegram."""
-    from routes.notifications import send_text, is_configured
+    from routes.notifications import (
+        send_text, send_photo, send_video, is_configured,
+        get_latest_frame, build_clip,
+    )
     await asyncio.sleep(10)  # Initial delay
     while True:
         try:
@@ -275,9 +280,26 @@ async def _reminder_poller(ai_db):
                 due = ai_db.get_due_reminders()
                 for reminder in due:
                     try:
-                        await send_text(f"⏰ Reminder: {reminder['message']}")
+                        msg = reminder["message"]
+                        media_type = reminder.get("media_type", "text")
+
+                        if media_type == "snapshot":
+                            frame = get_latest_frame()
+                            if frame:
+                                await send_photo(frame, f"⏰ Reminder: {msg}")
+                            else:
+                                await send_text(f"⏰ Reminder: {msg}\n\n(Snapshot unavailable — camera may be offline)")
+                        elif media_type == "clip":
+                            clip = build_clip(duration=5.0, fps=10)
+                            if clip:
+                                await send_video(clip, f"⏰🎬 Reminder: {msg}")
+                            else:
+                                await send_text(f"⏰ Reminder: {msg}\n\n(Video clip unavailable — camera may be offline)")
+                        else:
+                            await send_text(f"⏰ Reminder: {msg}")
+
                         ai_db.mark_reminder_sent(reminder["id"])
-                        logger.info(f"Sent reminder {reminder['id']}: {reminder['message']}")
+                        logger.info(f"Sent reminder {reminder['id']} ({media_type}): {msg}")
                     except Exception as e:
                         logger.warning(f"Failed to send reminder {reminder['id']}: {e}")
         except Exception as e:
@@ -286,23 +308,61 @@ async def _reminder_poller(ai_db):
 
 
 async def _ensure_ollama_model():
-    """Background task: pull the AI model on first startup if not already cached."""
+    """Background task: pull the AI model on first startup if not already cached,
+    then send a warm-up message to force GPU load (saved to chat history)."""
     import ollama as ollama_lib
     import os
     host = os.getenv("OLLAMA_HOST", "http://ollama:11434")
     model = "qwen3:14b"
-    await asyncio.sleep(5)  # Wait for Ollama to fully start
+    await asyncio.sleep(10)  # Wait for other GPU services to finish CUDA init
     try:
         client = ollama_lib.Client(host=host)
         # Check if model already exists
         models = client.list()
         model_names = [m.model for m in models.models] if models.models else []
-        if any(model in name for name in model_names):
+        if not any(model in name for name in model_names):
+            logger.info(f"Pulling AI model '{model}' (~9.3 GB, first-time download)...")
+            client.pull(model)
+            logger.info(f"AI model '{model}' downloaded successfully")
+        else:
             logger.info(f"AI model '{model}' already available")
-            return
-        logger.info(f"Pulling AI model '{model}' (~9.3 GB, first-time download)...")
-        client.pull(model)
-        logger.info(f"AI model '{model}' downloaded successfully")
+
+        # Warm-up: send a real chat message to force the model into GPU memory.
+        # This message + reply are saved to chat history so the user sees it.
+        logger.info(f"Warming up AI model '{model}' (loading into GPU memory)...")
+
+        # Access the AI DB that was set up by startup
+        from routes.ai import _ai_db
+        startup_msg = "⚡ System restart detected — loading AI model into memory..."
+
+        try:
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, lambda: client.chat(
+                model=model,
+                messages=[{"role": "user", "content": "The system just restarted. Confirm you are loaded and ready in one short sentence."}],
+                options={"num_predict": 30, "num_ctx": 8192},
+            ))
+            # ollama library returns objects, not dicts
+            reply = getattr(resp.message, "content", "") or "Model loaded and ready."
+            # Strip <think> blocks from Qwen 3
+            import re
+            reply = re.sub(r"<think>.*?</think>\s*", "", reply, flags=re.DOTALL).strip()
+            if not reply:
+                reply = "Model loaded and ready."
+            logger.info(f"AI model '{model}' loaded into GPU memory — ready for chat")
+
+            # Signal that the model is now in GPU memory
+            set_gpu_ready_flag(True)
+
+            # Save both messages to chat history so user sees them
+            if _ai_db:
+                _ai_db.save_message("system", startup_msg)
+                _ai_db.save_message("assistant", f"✅ {reply}")
+        except Exception as warm_err:
+            logger.warning(f"Warm-up chat failed (model may still load on first use): {warm_err}")
+            if _ai_db:
+                _ai_db.save_message("system", startup_msg)
+                _ai_db.save_message("assistant", "⚠️ Model is still loading — it will be ready when you send your first message.")
     except Exception as e:
         logger.warning(f"Failed to pull AI model: {e} (AI chat will be unavailable until model is pulled)")
 
@@ -375,7 +435,8 @@ async def _event_notification_poller():
 
             # Parse timestamp from event data
             ts = float(event_data.get("timestamp", time.time()))
-            dt = datetime.fromtimestamp(ts)
+            _tz = ZoneInfo(os.getenv("LOCATION_TIMEZONE", "America/Toronto"))
+            dt = datetime.fromtimestamp(ts, tz=_tz)
             day_str = dt.strftime("%Y-%m-%d")
             time_str = dt.strftime("%H-%M-%S")
             vehicle_class = event_data.get("vehicle_class", "vehicle")
