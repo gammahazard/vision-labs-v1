@@ -178,6 +178,7 @@ class TrackedVehicle:
         self.frame_count = 1
         self.idle_alerted = False           # Whether idle notification was sent
         self.snapshot_key = ""              # Redis key for stored snapshot
+        self.snapshot_bbox = bbox           # Bbox at the time snapshot was captured
 
     def update(self, bbox: list, confidence: float, timestamp: float):
         """Update vehicle state with a new detection."""
@@ -427,6 +428,7 @@ class PersonTracker:
                     snap_key = f"vehicle_snapshot:{CAMERA_ID}:{int(veh.first_seen)}"
                     self.r.setex(snap_key, 86400, frame_bytes)
                     veh.snapshot_key = snap_key
+                    veh.snapshot_bbox = bbox  # Store bbox matching the snapshot frame
 
                 # Check for idle timeout
                 if (veh.duration >= VEHICLE_IDLE_TIMEOUT
@@ -446,6 +448,7 @@ class PersonTracker:
                     snap_key = f"vehicle_snapshot:{CAMERA_ID}:{int(timestamp)}"
                     self.r.setex(snap_key, 86400, frame_bytes)
                     veh.snapshot_key = snap_key
+                    veh.snapshot_bbox = bbox  # Store bbox matching the snapshot frame
 
                 self.tracked_vehicles[vid] = veh
 
@@ -484,6 +487,7 @@ class PersonTracker:
             "vehicle_class": veh.class_name,
             "vehicle_confidence": str(round(veh.confidence, 3)),
             "snapshot_key": veh.snapshot_key,
+            "snapshot_bbox": json.dumps(veh.snapshot_bbox),
             "time_period": get_time_period(),
         }
 
@@ -520,6 +524,7 @@ class PersonTracker:
             "vehicle_class": veh.class_name,
             "vehicle_confidence": str(round(veh.confidence, 3)),
             "snapshot_key": veh.snapshot_key,
+            "snapshot_bbox": json.dumps(veh.snapshot_bbox),
             "time_period": get_time_period(),
         }
 

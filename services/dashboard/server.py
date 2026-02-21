@@ -517,7 +517,8 @@ async def _event_notification_poller():
                 return
 
             # Draw bbox highlight if present in event data
-            bbox_json = event_data.get("bbox", "")
+            # Prefer snapshot_bbox (bbox at capture time) over bbox (latest position)
+            bbox_json = event_data.get("snapshot_bbox", "") or event_data.get("bbox", "")
             vehicle_class = event_data.get("vehicle_class", "vehicle")
             if bbox_json:
                 try:
