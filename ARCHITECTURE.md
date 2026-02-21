@@ -384,7 +384,8 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `faces.py` | `GET /api/faces`, `POST /api/faces/preview`, `POST /api/faces/enroll`, `DELETE /api/faces/{id}`, `GET /api/faces/{id}/photo` | Proxy to face-recognizer :8081 |
 | `unknowns.py` | `GET /api/unknowns`, `GET /api/unknowns/{id}/photo`, `POST /api/unknowns/{id}/label`, `DELETE /api/unknowns/clear`, `DELETE /api/unknowns/{id}` | Proxy to face-recognizer :8081, emits event on label |
 | `zones.py` | `GET /api/zones`, `POST /api/zones`, `PUT /api/zones/{id}`, `DELETE /api/zones/{id}` | Zone CRUD in Redis hash |
-| `notifications.py` | `GET /api/notifications/status`, `POST /api/notifications/test` | Telegram bot integration + helpers |
+| `notifications.py` | `GET /api/notifications/status`, `POST /api/notifications/test` | Telegram bot integration + feedback inline buttons |
+| `feedback.py` | `GET /api/feedback`, `GET /api/feedback/stats`, `GET /api/feedback/rules`, `POST /api/feedback/{event_id}`, `POST /api/feedback/rules/{id}/toggle`, `DELETE /api/feedback/rules/{id}` | Self-learning feedback CRUD + suppression rules |
 
 **Shared state pattern:** `routes/__init__.py` defines module-level variables (`r`, `logger`, `FACE_API_URL`, all stream keys). `server.py` sets these before importing routers. Each route module does `import routes as ctx` to access them.
 

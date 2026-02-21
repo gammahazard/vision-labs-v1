@@ -161,6 +161,7 @@ from routes.zones import router as zones_router
 from routes.notifications import router as notifications_router
 from routes.auth import router as auth_router, init_auth_db, validate_session
 from routes.browse import router as browse_router
+from routes.feedback import router as feedback_router, set_feedback_db
 
 app.include_router(events_router)
 app.include_router(config_router)
@@ -171,6 +172,7 @@ app.include_router(zones_router)
 app.include_router(notifications_router)
 app.include_router(auth_router)
 app.include_router(browse_router)
+app.include_router(feedback_router)
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +226,19 @@ async def startup():
     else:
         logger.info(f"Config already exists in {CONFIG_KEY}: {existing}")
 
+    # Initialize feedback database for self-learning loop
+    from feedback_db import FeedbackDB
+    global _feedback_db
+    _feedback_db = FeedbackDB("/data/feedback.db")
+    set_feedback_db(_feedback_db)
+    logger.info("Feedback database initialized")
+
     # Start background event notification poller
     asyncio.create_task(_event_notification_poller())
+
+    # Start Telegram callback poller (receives inline button taps)
+    from routes.notifications import poll_telegram_callbacks
+    asyncio.create_task(poll_telegram_callbacks(_feedback_db))
 
     logger.info(f"Dashboard ready at http://localhost:{DASHBOARD_PORT}")
 
@@ -245,6 +258,10 @@ async def _event_notification_poller():
         notify_person_detected, notify_person_identified,
         notify_vehicle_idle, is_configured, get_latest_frame,
     )
+
+    # Get feedback_db reference
+    global _feedback_db
+    fdb = _feedback_db if '_feedback_db' in globals() else None
 
     # Ensure snapshot directory exists
     SNAPSHOT_DIR = os.path.join(os.environ.get("SNAPSHOT_DIR", "/data/snapshots"))
@@ -329,11 +346,15 @@ async def _event_notification_poller():
                             await loop.run_in_executor(None, _save_snapshot, msg_id)
                             # Optionally send Telegram notification
                             if is_configured():
-                                await notify_person_detected(data)
+                                await notify_person_detected(
+                                    data, event_id=msg_id, feedback_db=fdb
+                                )
 
                         elif event_type == "person_identified":
                             if is_configured():
-                                await notify_person_identified(data)
+                                await notify_person_identified(
+                                    data, event_id=msg_id, feedback_db=fdb
+                                )
 
                         elif event_type == "vehicle_detected":
                             # Save vehicle snapshot to disk in day folder
@@ -351,7 +372,9 @@ async def _event_notification_poller():
                                     None, _save_vehicle_snapshot, snapshot_key, data
                                 )
                             if is_configured():
-                                await notify_vehicle_idle(data)
+                                await notify_vehicle_idle(
+                                    data, event_id=msg_id, feedback_db=fdb
+                                )
 
             # Periodic cleanup every ~100 iterations (~200s)
             cleanup_counter += 1
