@@ -80,6 +80,8 @@ async def get_vehicle_snapshot(key: str):
 
     Vehicle snapshots are stored with a 24h TTL in Redis keys like:
     vehicle_snapshot:{camera_id}:{timestamp}
+
+    Also draws the bounding box if a companion bbox key exists.
     """
     try:
         # Use a raw-bytes Redis client (ctx.r has decode_responses=True
@@ -92,6 +94,24 @@ async def get_vehicle_snapshot(key: str):
         data = r_bin.get(key)
         if not data:
             return JSONResponse(status_code=404, content={"error": "Snapshot expired or not found"})
+
+        # Draw bbox if companion key exists
+        bbox_raw = r_bin.get(f"{key}:bbox")
+        if bbox_raw:
+            try:
+                import json, cv2, numpy as np
+                bbox = json.loads(bbox_raw)
+                if len(bbox) == 4:
+                    np_arr = np.frombuffer(data, np.uint8)
+                    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        x1, y1, x2, y2 = [int(v) for v in bbox]
+                        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 3)
+                        _, data = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        data = data.tobytes()
+            except Exception:
+                pass  # Serve raw frame if drawing fails
+
         return Response(content=data, media_type="image/jpeg")
     except redis.ConnectionError:
         return JSONResponse(status_code=503, content={"error": "Redis unavailable"})

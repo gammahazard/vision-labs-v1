@@ -63,6 +63,8 @@ from streams import (
     ZONE_KEY as _ZONE_TMPL,
     IDENTITY_KEY as _IDKEY_TMPL,
     VEHICLE_STREAM as _VEH_TMPL,
+    VEHICLE_SNAPSHOT_KEY as _VSNAP_TMPL,
+    VEHICLE_SNAPSHOT_BBOX_KEY as _VSNAP_BBOX_TMPL,
     stream_key,
 )
 
@@ -425,8 +427,10 @@ class PersonTracker:
 
                 # Store/update snapshot if frame bytes provided
                 if frame_bytes and not veh.snapshot_key:
-                    snap_key = f"vehicle_snapshot:{CAMERA_ID}:{int(veh.first_seen)}"
+                    snap_key = stream_key(_VSNAP_TMPL, camera_id=CAMERA_ID, timestamp=int(veh.first_seen))
+                    bbox_key = stream_key(_VSNAP_BBOX_TMPL, camera_id=CAMERA_ID, timestamp=int(veh.first_seen))
                     self.r.setex(snap_key, 86400, frame_bytes)
+                    self.r.setex(bbox_key, 86400, json.dumps(bbox))
                     veh.snapshot_key = snap_key
                     veh.snapshot_bbox = bbox  # Store bbox matching the snapshot frame
 
@@ -445,8 +449,10 @@ class PersonTracker:
 
                 # Store snapshot in Redis with 24h TTL
                 if frame_bytes:
-                    snap_key = f"vehicle_snapshot:{CAMERA_ID}:{int(timestamp)}"
+                    snap_key = stream_key(_VSNAP_TMPL, camera_id=CAMERA_ID, timestamp=int(timestamp))
+                    bbox_key = stream_key(_VSNAP_BBOX_TMPL, camera_id=CAMERA_ID, timestamp=int(timestamp))
                     self.r.setex(snap_key, 86400, frame_bytes)
+                    self.r.setex(bbox_key, 86400, json.dumps(bbox))
                     veh.snapshot_key = snap_key
                     veh.snapshot_bbox = bbox  # Store bbox matching the snapshot frame
 

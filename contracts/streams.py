@@ -90,6 +90,16 @@ VEHICLE_STREAM = "detections:vehicle:{camera_id}"
 # Consumed by: dashboard (HD live view toggle)
 HD_FRAME_KEY = "frame_hd:{camera_id}"
 
+# Vehicle detection snapshot — JPEG bytes stored per detection with 24h TTL
+# Published by: tracker (from vehicle-detector frame_bytes)
+# Consumed by: dashboard (event feed + browse area)
+VEHICLE_SNAPSHOT_KEY = "vehicle_snapshot:{camera_id}:{timestamp}"
+
+# Companion bbox for vehicle snapshot (JSON [x1,y1,x2,y2] at capture time)
+# Published by: tracker (alongside VEHICLE_SNAPSHOT_KEY)
+# Consumed by: dashboard (draws bbox on snapshot when served)
+VEHICLE_SNAPSHOT_BBOX_KEY = "vehicle_snapshot:{camera_id}:{timestamp}:bbox"
+
 
 def stream_key(template: str, **kwargs) -> str:
     """Resolve a stream key template with actual values.
