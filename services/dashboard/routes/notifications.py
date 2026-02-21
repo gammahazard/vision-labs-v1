@@ -50,12 +50,23 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Security — only these Telegram user IDs can send bot commands
+# Comma-separated in .env, e.g. TELEGRAM_ALLOWED_USERS=1004507388,123456789
+TELEGRAM_ALLOWED_USERS: set[int] = {
+    int(uid.strip())
+    for uid in os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
+    if uid.strip().isdigit()
+}
+
 # Timezone — Toronto (handles EST/EDT automatically)
 TZ_LOCAL = ZoneInfo("America/Toronto")
 
 # Rate limiting — max 1 person-detected notification per N seconds
 RATE_LIMIT_SECONDS = 60
 _last_person_notification = 0.0
+
+# Arm/disarm state — when disarmed, no notifications are sent
+_notifications_armed = True
 
 # Redis config — for binary frame reads
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -72,6 +83,31 @@ def _now_str() -> str:
 def is_configured() -> bool:
     """Check if Telegram bot token and chat ID are both set."""
     return bool(TELEGRAM_BOT_TOKEN) and bool(TELEGRAM_CHAT_ID)
+
+
+def is_armed() -> bool:
+    """Check if notifications are currently armed."""
+    return _notifications_armed
+
+
+def _is_authorized(user_id: int | None, chat_id: int | None) -> bool:
+    """
+    Security gate — validates BOTH user ID whitelist AND chat ID.
+
+    - user_id must be in TELEGRAM_ALLOWED_USERS (if whitelist is non-empty)
+    - chat_id must match TELEGRAM_CHAT_ID (only your private chat)
+    - Returns False if either check fails or values are missing
+    - Silent rejection — caller should NOT respond to unauthorized users
+    """
+    if not user_id or not chat_id:
+        return False
+    # Chat ID must match your private chat
+    if str(chat_id) != TELEGRAM_CHAT_ID:
+        return False
+    # User ID must be in whitelist (if whitelist is configured)
+    if TELEGRAM_ALLOWED_USERS and user_id not in TELEGRAM_ALLOWED_USERS:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +426,7 @@ async def notify_person_detected(event_data: dict,
     """
     global _last_person_notification
 
-    if not is_configured():
+    if not is_configured() or not is_armed():
         return 0
 
     now = time.time()
@@ -462,7 +498,7 @@ async def notify_person_identified(event_data: dict,
     This is NOT rate-limited because identification is a significant event.
     Returns the Telegram message ID (0 if not sent).
     """
-    if not is_configured():
+    if not is_configured() or not is_armed():
         return 0
 
     person_id = event_data.get("person_id", "unknown")
@@ -540,7 +576,7 @@ async def notify_vehicle_idle(event_data: dict,
     """
     global _last_vehicle_idle_notification
 
-    if not is_configured():
+    if not is_configured() or not is_armed():
         return 0
 
     now = time.time()
@@ -617,12 +653,14 @@ _telegram_update_offset = 0
 
 async def poll_telegram_callbacks(feedback_db):
     """
-    Background task: poll Telegram for callback_query updates.
-    Routes verdicts to the feedback database.
+    Background task: poll Telegram for updates (callback queries + commands).
 
-    This is the "receive" side of the inline keyboard conversation.
-    When user taps ✅/❌/👤, Telegram sends a callback_query which
-    we pick up here via long-polling getUpdates.
+    Handles two types of incoming updates:
+    1. callback_query — verdict buttons (✅/❌/👤) on notification messages
+    2. message — bot commands (/snapshot, /clip, /status, /arm, /disarm, /who)
+
+    Security: ALL incoming updates are validated via _is_authorized() before
+    processing. Unauthorized users are silently ignored.
     """
     global _telegram_update_offset
 
@@ -630,7 +668,10 @@ async def poll_telegram_callbacks(feedback_db):
         logger.info("Telegram not configured — callback poller disabled")
         return
 
-    logger.info("Telegram callback poller started")
+    if TELEGRAM_ALLOWED_USERS:
+        logger.info(f"Telegram poller started — authorized users: {TELEGRAM_ALLOWED_USERS}")
+    else:
+        logger.warning("Telegram poller started — NO user whitelist set (commands disabled)")
 
     while True:
         try:
@@ -640,7 +681,7 @@ async def poll_telegram_callbacks(feedback_db):
                     params={
                         "offset": _telegram_update_offset,
                         "timeout": 30,
-                        "allowed_updates": json.dumps(["callback_query"]),
+                        "allowed_updates": json.dumps(["callback_query", "message"]),
                     },
                     timeout=40,
                 )
@@ -653,17 +694,40 @@ async def poll_telegram_callbacks(feedback_db):
             updates = resp.json().get("result", [])
             for update in updates:
                 _telegram_update_offset = update["update_id"] + 1
+
+                # --- Callback queries (verdict buttons) ---
                 cb = update.get("callback_query")
-                if not cb:
+                if cb:
+                    cb_user_id = cb.get("from", {}).get("id")
+                    cb_chat_id = cb.get("message", {}).get("chat", {}).get("id")
+                    if not _is_authorized(cb_user_id, cb_chat_id):
+                        logger.warning(f"Unauthorized callback from user {cb_user_id}")
+                        continue
+                    await _handle_callback(
+                        cb.get("data", ""),
+                        cb.get("id", ""),
+                        cb.get("message", {}).get("message_id", 0),
+                        feedback_db,
+                    )
                     continue
 
-                callback_data = cb.get("data", "")
-                callback_id = cb.get("id", "")
-                message_id = cb.get("message", {}).get("message_id", 0)
+                # --- Messages (bot commands) ---
+                msg = update.get("message")
+                if msg:
+                    msg_user_id = msg.get("from", {}).get("id")
+                    msg_chat_id = msg.get("chat", {}).get("id")
+                    text = msg.get("text", "").strip()
 
-                await _handle_callback(
-                    callback_data, callback_id, message_id, feedback_db
-                )
+                    if not _is_authorized(msg_user_id, msg_chat_id):
+                        # Silent rejection — don't reveal bot exists
+                        logger.warning(f"Unauthorized command from user {msg_user_id}: {text}")
+                        continue
+
+                    # Route to command handlers
+                    if text.startswith("/"):
+                        cmd = text.split()[0].lower().split("@")[0]  # Strip @botname
+                        logger.info(f"Command from user {msg_user_id}: {cmd}")
+                        await _handle_command(cmd)
 
         except httpx.ReadTimeout:
             # Normal — long poll timed out with no updates
@@ -671,6 +735,158 @@ async def poll_telegram_callbacks(feedback_db):
         except Exception as e:
             logger.warning(f"Callback poller error: {e}")
             await asyncio.sleep(5)
+
+
+async def _handle_command(cmd: str):
+    """Route a bot command to the appropriate handler."""
+    handlers = {
+        "/snapshot": _cmd_snapshot,
+        "/clip": _cmd_clip,
+        "/status": _cmd_status,
+        "/arm": _cmd_arm,
+        "/disarm": _cmd_disarm,
+        "/who": _cmd_who,
+        "/start": _cmd_help,
+        "/help": _cmd_help,
+    }
+    handler = handlers.get(cmd)
+    if handler:
+        try:
+            await handler()
+        except Exception as e:
+            logger.warning(f"Command {cmd} failed: {e}")
+            await send_text(f"⚠️ Command failed: {e}")
+    else:
+        await send_text(
+            "❓ Unknown command. Available:\n"
+            "/snapshot — Live camera photo\n"
+            "/clip — 5-second video clip\n"
+            "/status — System health\n"
+            "/arm — Enable notifications\n"
+            "/disarm — Disable notifications\n"
+            "/who — Who's in frame now"
+        )
+
+
+async def _cmd_snapshot():
+    """Send a live camera snapshot."""
+    frame = get_latest_frame()
+    if frame:
+        await send_photo(frame, f"📸 Live snapshot — {_now_str()}")
+    else:
+        await send_text("⚠️ No camera frame available")
+
+
+async def _cmd_clip():
+    """Capture and send a 5-second video clip."""
+    await send_text("🎬 Recording 5-second clip...")
+    loop = asyncio.get_running_loop()
+    clip_bytes = await loop.run_in_executor(
+        None, lambda: build_clip(duration=5.0, fps=10)
+    )
+    if clip_bytes:
+        await send_video(clip_bytes, f"🎬 Live clip — {_now_str()}")
+    else:
+        await send_text("⚠️ Failed to capture clip — not enough frames")
+
+
+async def _cmd_status():
+    """Send system health summary."""
+    global _notifications_armed
+    try:
+        r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        info = r_bin.info("memory")
+        mem_used = info.get("used_memory_human", "?")
+
+        # Check frame stream health
+        r_raw = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+        frame_len = r_raw.xlen(ctx.FRAME_STREAM.encode()) if ctx.FRAME_STREAM else 0
+        hd_exists = bool(r_raw.get(ctx.HD_FRAME_KEY.encode())) if ctx.HD_FRAME_KEY else False
+
+        # Check event stream length
+        event_stream = f"events:{os.getenv('CAMERA_ID', 'front_door')}"
+        event_len = r_bin.xlen(event_stream)
+
+        armed_str = "🟢 Armed" if _notifications_armed else "🔴 Disarmed"
+
+        status = (
+            f"📊 <b>System Status</b>\n"
+            f"\u2022 Notifications: {armed_str}\n"
+            f"\u2022 Redis memory: {mem_used}\n"
+            f"\u2022 Frame buffer: {frame_len} frames\n"
+            f"\u2022 HD stream: {'✅' if hd_exists else '❌'}\n"
+            f"\u2022 Events total: {event_len}\n"
+            f"\u2022 Time: {_now_str()}"
+        )
+        await send_text(status)
+    except Exception as e:
+        await send_text(f"⚠️ Status check failed: {e}")
+
+
+async def _cmd_arm():
+    """Enable notifications."""
+    global _notifications_armed
+    _notifications_armed = True
+    await send_text("🟢 Notifications <b>armed</b> — you will receive alerts.")
+    logger.info("Notifications armed via Telegram command")
+
+
+async def _cmd_disarm():
+    """Disable notifications."""
+    global _notifications_armed
+    _notifications_armed = False
+    await send_text("🔴 Notifications <b>disarmed</b> — alerts paused until you /arm again.")
+    logger.info("Notifications disarmed via Telegram command")
+
+
+async def _cmd_who():
+    """Report who/what is currently in the camera frame."""
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        state_key = f"state:{os.getenv('CAMERA_ID', 'front_door')}"
+        state_raw = r.get(state_key)
+        if not state_raw:
+            await send_text("👀 No detection state available — scene may be clear.")
+            return
+
+        state = json.loads(state_raw)
+        people = state.get("people", [])
+        vehicles = state.get("vehicles", [])
+
+        parts = ["👁️ <b>Current Scene</b>"]
+        if people:
+            parts.append(f"\u2022 People: {len(people)}")
+            for p in people[:5]:
+                name = p.get("identity", p.get("id", "unknown"))
+                action = p.get("action", "")
+                parts.append(f"  — {name}{f' ({action})' if action else ''}")
+        else:
+            parts.append("\u2022 People: none")
+
+        if vehicles:
+            parts.append(f"\u2022 Vehicles: {len(vehicles)}")
+            for v in vehicles[:5]:
+                parts.append(f"  — {v.get('class', 'vehicle')}")
+        else:
+            parts.append("\u2022 Vehicles: none")
+
+        parts.append(f"\u2022 Time: {_now_str()}")
+        await send_text("\n".join(parts))
+    except Exception as e:
+        await send_text(f"⚠️ Failed to read scene state: {e}")
+
+
+async def _cmd_help():
+    """Send list of available commands."""
+    await send_text(
+        "🤖 <b>Vision Labs Bot</b>\n\n"
+        "/snapshot — 📸 Live camera photo\n"
+        "/clip — 🎬 5-second video clip\n"
+        "/status — 📊 System health\n"
+        "/arm — 🟢 Enable notifications\n"
+        "/disarm — 🔴 Disable notifications\n"
+        "/who — 👁️ Who's in frame now"
+    )
 
 
 async def _handle_callback(callback_data: str, callback_id: str,
@@ -705,9 +921,6 @@ async def _handle_callback(callback_data: str, callback_id: str,
         return
 
     if verdict == "identified":
-        # For "identify" — we record it with a placeholder.
-        # The user can name the person from the dashboard review queue.
-        # For now, acknowledge and mark as identified-pending.
         feedback_db.resolve_pending(event_id, "identified", identity_label="")
         await answer_callback_query(callback_id, "Marked for identification — name from dashboard")
         await edit_message_buttons(message_id, "👤 Awaiting name (dashboard)")
