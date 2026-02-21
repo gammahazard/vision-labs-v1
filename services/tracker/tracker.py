@@ -62,6 +62,7 @@ from streams import (
     CONFIG_KEY as _CFG_TMPL,
     ZONE_KEY as _ZONE_TMPL,
     IDENTITY_KEY as _IDKEY_TMPL,
+    VEHICLE_STREAM as _VEH_TMPL,
     stream_key,
 )
 
@@ -74,17 +75,23 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", "0.3"))
 LOST_TIMEOUT = float(os.getenv("LOST_TIMEOUT", "8.0"))
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "trackers")
+VEHICLE_CONSUMER_GROUP = os.getenv("VEHICLE_CONSUMER_GROUP", "vehicle_trackers")
 CONSUMER_NAME = os.getenv("CONSUMER_NAME", "tracker_1")
 
 # Stream keys — resolved from contracts/streams.py
 DETECTION_STREAM = stream_key(_DET_TMPL, detector_type="pose", camera_id=CAMERA_ID)
 EVENT_STREAM = stream_key(_EVT_TMPL, camera_id=CAMERA_ID)
 STATE_KEY = stream_key(_STATE_TMPL, camera_id=CAMERA_ID)
+VEHICLE_STREAM = stream_key(_VEH_TMPL, camera_id=CAMERA_ID)
 CONFIG_KEY = stream_key(_CFG_TMPL, camera_id=CAMERA_ID)
 ZONE_KEY = stream_key(_ZONE_TMPL, camera_id=CAMERA_ID)
 IDENTITY_KEY = stream_key(_IDKEY_TMPL, camera_id=CAMERA_ID)
 
 MAX_EVENT_STREAM_LEN = 5000  # Keep more events than frames (they're small)
+VEHICLE_RATE_LIMIT_SEC = 10  # Max 1 vehicle event per 10 seconds
+VEHICLE_IDLE_TIMEOUT = float(os.getenv("VEHICLE_IDLE_TIMEOUT", "5.0"))  # Seconds before idle alert
+VEHICLE_LOST_TIMEOUT = 10.0  # Seconds before dropping a tracked vehicle
+VEHICLE_IOU_THRESHOLD = 0.2  # Lower than person IoU — vehicles don't move much when parked
 CONFIG_RELOAD_INTERVAL = 10  # Check config every N detection messages
 ACTION_DEBOUNCE_FRAMES = 10  # New action must be stable for N frames before we accept it
 ACTION_STICKY_MULTIPLIER = 2 # Once set, require N * multiplier frames to change away
@@ -147,6 +154,50 @@ def compute_iou(box_a: list, box_b: list) -> float:
         return 0.0
 
     return intersection / union
+
+
+# ---------------------------------------------------------------------------
+# Tracked Vehicle State
+# ---------------------------------------------------------------------------
+class TrackedVehicle:
+    """
+    Represents a vehicle being tracked across frames.
+
+    Uses IoU matching to determine if a detected vehicle is the same one
+    seen in previous frames. Tracks duration for idle detection.
+    """
+
+    def __init__(self, vehicle_id: str, bbox: list, class_name: str,
+                 confidence: float, timestamp: float):
+        self.vehicle_id = vehicle_id
+        self.bbox = bbox                    # Current bounding box [x1, y1, x2, y2]
+        self.class_name = class_name        # car, truck, bus, motorcycle
+        self.confidence = confidence
+        self.first_seen = timestamp         # When this vehicle first appeared
+        self.last_seen = timestamp          # Last frame it was detected in
+        self.frame_count = 1
+        self.idle_alerted = False           # Whether idle notification was sent
+        self.snapshot_key = ""              # Redis key for stored snapshot
+
+    def update(self, bbox: list, confidence: float, timestamp: float):
+        """Update vehicle state with a new detection."""
+        self.bbox = bbox
+        self.confidence = confidence
+        self.last_seen = timestamp
+        self.frame_count += 1
+
+    @property
+    def duration(self) -> float:
+        """How long this vehicle has been seen (seconds)."""
+        return self.last_seen - self.first_seen
+
+    @property
+    def center(self) -> tuple:
+        """Center point of the bounding box."""
+        return (
+            (self.bbox[0] + self.bbox[2]) / 2,
+            (self.bbox[1] + self.bbox[3]) / 2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +328,9 @@ class PersonTracker:
         self.frame_width = 640   # Updated from detection messages
         self.frame_height = 480  # Updated from detection messages
         self._identity_load_time = 0  # Timestamp of last identity load
+        self._last_vehicle_event_time = 0.0  # Rate limiting for vehicle events
+        self.tracked_vehicles: dict[str, TrackedVehicle] = {}  # vehicle_id → TrackedVehicle
+        self._next_vehicle_id = 1  # Simple incrementing ID counter
 
     def _generate_id(self) -> str:
         """Generate a short, readable person ID."""
@@ -320,6 +374,158 @@ class PersonTracker:
             f"action={person.action} | "
             f"duration={person.duration:.1f}s | direction={person.direction}"
             f"{zone_str}"
+        )
+
+    def _process_vehicle_detections(self, detections: list, timestamp: float, frame_bytes: bytes = None):
+        """
+        Track vehicles across frames using IoU matching and emit events.
+
+        For each incoming detection:
+        1. Match to existing tracked vehicles using IoU
+        2. If matched → update state, check for idle timeout
+        3. If new → create TrackedVehicle, emit vehicle_detected
+        4. Prune stale vehicles not seen for VEHICLE_LOST_TIMEOUT
+
+        Emits:
+        - vehicle_detected: when a new vehicle first appears
+        - vehicle_idle: when a vehicle stays in roughly the same spot
+                        for > VEHICLE_IDLE_TIMEOUT seconds
+        """
+        now = time.time()
+
+        # --- Step 1: Match incoming detections to tracked vehicles via IoU ---
+        matched_vehicle_ids = set()
+
+        for det in detections:
+            bbox = det.get("bbox", [0, 0, 0, 0])
+            class_name = det.get("class_name", "vehicle")
+            confidence = det.get("confidence", 0)
+
+            # Skip vehicles in dead zones
+            if self._check_in_dead_zone(bbox):
+                continue
+
+            # Try to match to existing tracked vehicle
+            best_match_id = None
+            best_iou = VEHICLE_IOU_THRESHOLD
+
+            for vid, veh in self.tracked_vehicles.items():
+                iou = compute_iou(bbox, veh.bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match_id = vid
+
+            if best_match_id:
+                # --- Existing vehicle: update state ---
+                veh = self.tracked_vehicles[best_match_id]
+                veh.update(bbox, confidence, timestamp)
+                matched_vehicle_ids.add(best_match_id)
+
+                # Store/update snapshot if frame bytes provided
+                if frame_bytes and not veh.snapshot_key:
+                    snap_key = f"vehicle_snapshot:{CAMERA_ID}:{int(veh.first_seen)}"
+                    self.r.setex(snap_key, 86400, frame_bytes)
+                    veh.snapshot_key = snap_key
+
+                # Check for idle timeout
+                if (veh.duration >= VEHICLE_IDLE_TIMEOUT
+                        and not veh.idle_alerted):
+                    veh.idle_alerted = True
+                    self._emit_vehicle_idle_event(veh, timestamp)
+
+            else:
+                # --- New vehicle: create tracker and emit detection event ---
+                vid = f"vehicle_{self._next_vehicle_id:04d}"
+                self._next_vehicle_id += 1
+
+                veh = TrackedVehicle(vid, bbox, class_name, confidence, timestamp)
+
+                # Store snapshot in Redis with 24h TTL
+                if frame_bytes:
+                    snap_key = f"vehicle_snapshot:{CAMERA_ID}:{int(timestamp)}"
+                    self.r.setex(snap_key, 86400, frame_bytes)
+                    veh.snapshot_key = snap_key
+
+                self.tracked_vehicles[vid] = veh
+
+                # Rate-limit vehicle_detected events to avoid flood
+                if now - self._last_vehicle_event_time >= VEHICLE_RATE_LIMIT_SEC:
+                    self._emit_vehicle_detected_event(veh, timestamp)
+                    self._last_vehicle_event_time = now
+
+        # --- Step 2: Prune stale vehicles ---
+        stale_ids = [
+            vid for vid, veh in self.tracked_vehicles.items()
+            if timestamp - veh.last_seen > VEHICLE_LOST_TIMEOUT
+        ]
+        for vid in stale_ids:
+            del self.tracked_vehicles[vid]
+
+    def _emit_vehicle_detected_event(self, veh: 'TrackedVehicle', timestamp: float):
+        """Emit a vehicle_detected event to the events stream."""
+        zone_name, alert_level = self._find_zone(veh.bbox)
+        alert_triggered = should_alert(alert_level) if alert_level else False
+
+        event = {
+            "camera_id": CAMERA_ID,
+            "event_type": "vehicle_detected",
+            "timestamp": str(timestamp),
+            "person_id": "",
+            "identity_name": "",
+            "duration": "0",
+            "direction": "",
+            "action": "",
+            "bbox": json.dumps(veh.bbox),
+            "frame_count": str(veh.frame_count),
+            "zone": zone_name,
+            "alert_level": alert_level,
+            "alert_triggered": str(alert_triggered),
+            "vehicle_class": veh.class_name,
+            "vehicle_confidence": str(round(veh.confidence, 3)),
+            "snapshot_key": veh.snapshot_key,
+        }
+
+        self.r.xadd(EVENT_STREAM, event, maxlen=MAX_EVENT_STREAM_LEN)
+        self.total_events += 1
+
+        logger.info(
+            f"EVENT: vehicle_detected | {veh.class_name} ({veh.confidence:.2f})"
+            f"{f' | zone={zone_name}' if zone_name else ''}"
+        )
+
+    def _emit_vehicle_idle_event(self, veh: 'TrackedVehicle', timestamp: float):
+        """
+        Emit a vehicle_idle event when a vehicle has been stationary
+        for longer than VEHICLE_IDLE_TIMEOUT.
+        """
+        zone_name, alert_level = self._find_zone(veh.bbox)
+        alert_triggered = should_alert(alert_level) if alert_level else False
+
+        event = {
+            "camera_id": CAMERA_ID,
+            "event_type": "vehicle_idle",
+            "timestamp": str(timestamp),
+            "person_id": "",
+            "identity_name": "",
+            "duration": str(round(veh.duration, 1)),
+            "direction": "",
+            "action": "",
+            "bbox": json.dumps(veh.bbox),
+            "frame_count": str(veh.frame_count),
+            "zone": zone_name,
+            "alert_level": alert_level,
+            "alert_triggered": str(alert_triggered),
+            "vehicle_class": veh.class_name,
+            "vehicle_confidence": str(round(veh.confidence, 3)),
+            "snapshot_key": veh.snapshot_key,
+        }
+
+        self.r.xadd(EVENT_STREAM, event, maxlen=MAX_EVENT_STREAM_LEN)
+        self.total_events += 1
+
+        logger.info(
+            f"EVENT: vehicle_idle | {veh.class_name} idling {veh.duration:.1f}s"
+            f"{f' | zone={zone_name}' if zone_name else ''}"
         )
 
     def _load_zones(self):
@@ -531,15 +737,19 @@ class PersonTracker:
 # Redis Consumer Group Setup
 # ---------------------------------------------------------------------------
 def setup_consumer_group(r: redis.Redis) -> None:
-    """Create consumer group for the detection stream."""
-    try:
-        r.xgroup_create(DETECTION_STREAM, CONSUMER_GROUP, id="$", mkstream=True)
-        logger.info(f"Created consumer group '{CONSUMER_GROUP}' on '{DETECTION_STREAM}'")
-    except redis.ResponseError as e:
-        if "BUSYGROUP" in str(e):
-            logger.info(f"Consumer group '{CONSUMER_GROUP}' already exists")
-        else:
-            raise
+    """Create consumer groups for detection and vehicle streams."""
+    for stream, group in [
+        (DETECTION_STREAM, CONSUMER_GROUP),
+        (VEHICLE_STREAM, VEHICLE_CONSUMER_GROUP),
+    ]:
+        try:
+            r.xgroup_create(stream, group, id="$", mkstream=True)
+            logger.info(f"Created consumer group '{group}' on '{stream}'")
+        except redis.ResponseError as e:
+            if "BUSYGROUP" in str(e):
+                logger.info(f"Consumer group '{group}' already exists")
+            else:
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -551,9 +761,13 @@ def run():
 
     The tracker is a lightweight CPU service — no GPU needed. It just does
     bounding box math and state management.
+
+    Reads from two streams:
+    - DETECTION_STREAM (person detections from pose-detector)
+    - VEHICLE_STREAM (vehicle detections from vehicle-detector)
     """
     logger.info(f"Starting tracker for camera '{CAMERA_ID}'")
-    logger.info(f"Reading from: {DETECTION_STREAM}")
+    logger.info(f"Reading from: {DETECTION_STREAM} + {VEHICLE_STREAM}")
     logger.info(f"Publishing to: {EVENT_STREAM}")
     logger.info(f"State key: {STATE_KEY}")
     logger.info(f"IoU threshold: {IOU_THRESHOLD}, Lost timeout: {LOST_TIMEOUT}s")
@@ -563,7 +777,7 @@ def run():
     r.ping()
     logger.info("Redis connection verified")
 
-    # Setup consumer group
+    # Setup consumer groups (person + vehicle)
     setup_consumer_group(r)
 
     # Initialize tracker
@@ -571,62 +785,85 @@ def run():
     messages_processed = 0
 
     while not _shutdown:
-        # Read next detection from consumer group
         try:
+            # Read from both person and vehicle detection streams
             messages = r.xreadgroup(
                 CONSUMER_GROUP,
                 CONSUMER_NAME,
                 {DETECTION_STREAM: ">"},
                 count=1,
-                block=1000,
+                block=500,  # Shorter block so we can check vehicles too
+            )
+
+            # Also check for vehicle detections
+            vehicle_messages = r.xreadgroup(
+                VEHICLE_CONSUMER_GROUP,
+                CONSUMER_NAME,
+                {VEHICLE_STREAM: ">"},
+                count=1,
+                block=0,  # Non-blocking — just check what's available
             )
         except redis.ConnectionError:
             logger.warning("Redis connection lost — retrying...")
             time.sleep(1)
             continue
 
+        # --- Process person detections ---
         if not messages:
             # Even with no new detections, check for lost people
             tracker.update([], time.time())
-            continue
+        else:
+            for stream_name, entries in messages:
+                for message_id, data in entries:
+                    timestamp = float(data.get(b"timestamp", b"0").decode())
+                    detections_json = data.get(b"detections", b"[]").decode()
+                    detections = json.loads(detections_json)
 
-        for stream_name, entries in messages:
-            for message_id, data in entries:
-                timestamp = float(data.get(b"timestamp", b"0").decode())
-                detections_json = data.get(b"detections", b"[]").decode()
-                detections = json.loads(detections_json)
+                    # Hot-reload IoU and lost timeout from Redis config (set by dashboard)
+                    messages_processed += 1
+                    if messages_processed % CONFIG_RELOAD_INTERVAL == 0:
+                        try:
+                            cfg_iou = r.hget(CONFIG_KEY, "iou_threshold")
+                            cfg_timeout = r.hget(CONFIG_KEY, "lost_timeout")
+                            if cfg_iou:
+                                new_iou = float(cfg_iou)
+                                if new_iou != tracker.iou_threshold:
+                                    logger.info(f"Config updated: IoU {tracker.iou_threshold} → {new_iou}")
+                                    tracker.iou_threshold = new_iou
+                            if cfg_timeout:
+                                new_timeout = float(cfg_timeout)
+                                if new_timeout != tracker.lost_timeout:
+                                    logger.info(f"Config updated: lost_timeout {tracker.lost_timeout} → {new_timeout}")
+                                    tracker.lost_timeout = new_timeout
+                        except (ValueError, redis.ConnectionError):
+                            pass
 
-                # Hot-reload IoU and lost timeout from Redis config (set by dashboard)
-                messages_processed += 1
-                if messages_processed % CONFIG_RELOAD_INTERVAL == 0:
-                    try:
-                        cfg_iou = r.hget(CONFIG_KEY, "iou_threshold")
-                        cfg_timeout = r.hget(CONFIG_KEY, "lost_timeout")
-                        if cfg_iou:
-                            new_iou = float(cfg_iou)
-                            if new_iou != tracker.iou_threshold:
-                                logger.info(f"Config updated: IoU {tracker.iou_threshold} → {new_iou}")
-                                tracker.iou_threshold = new_iou
-                        if cfg_timeout:
-                            new_timeout = float(cfg_timeout)
-                            if new_timeout != tracker.lost_timeout:
-                                logger.info(f"Config updated: lost_timeout {tracker.lost_timeout} → {new_timeout}")
-                                tracker.lost_timeout = new_timeout
-                    except (ValueError, redis.ConnectionError):
-                        pass
+                    # Update frame dimensions from detection metadata
+                    fw = data.get(b"frame_width", b"").decode()
+                    fh = data.get(b"frame_height", b"").decode()
+                    if fw and fh:
+                        tracker.frame_width = int(fw)
+                        tracker.frame_height = int(fh)
 
-                # Update frame dimensions from detection metadata
-                fw = data.get(b"frame_width", b"").decode()
-                fh = data.get(b"frame_height", b"").decode()
-                if fw and fh:
-                    tracker.frame_width = int(fw)
-                    tracker.frame_height = int(fh)
+                    # Update tracker with new detections
+                    tracker.update(detections, timestamp)
 
-                # Update tracker with new detections
-                tracker.update(detections, timestamp)
+                    # Acknowledge message
+                    r.xack(DETECTION_STREAM, CONSUMER_GROUP, message_id)
 
-                # Acknowledge message
-                r.xack(DETECTION_STREAM, CONSUMER_GROUP, message_id)
+        # --- Process vehicle detections ---
+        if vehicle_messages:
+            for stream_name, entries in vehicle_messages:
+                for message_id, data in entries:
+                    timestamp = float(data.get(b"timestamp", b"0").decode())
+                    detections_json = data.get(b"detections", b"[]").decode()
+                    detections = json.loads(detections_json)
+                    frame_bytes = data.get(b"frame_bytes", None)
+
+                    if detections:
+                        tracker._process_vehicle_detections(detections, timestamp, frame_bytes)
+
+                    r.xack(VEHICLE_STREAM, VEHICLE_CONSUMER_GROUP, message_id)
 
     logger.info(
         f"Tracker stopped. Total events emitted: {tracker.total_events}"

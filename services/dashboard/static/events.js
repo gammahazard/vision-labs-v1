@@ -88,9 +88,11 @@ function renderEvent(evt) {
     const isLeft = evt.event_type === "person_left";
     const isActionChanged = evt.event_type === "action_changed";
     const isFaceEvent = evt.event_type === "face_reconciled" || evt.event_type === "face_enrolled" || evt.event_type === "person_identified";
+    const isVehicle = evt.event_type === "vehicle_detected";
+    const isVehicleIdle = evt.event_type === "vehicle_idle";
     const isAlert = evt.alert_triggered === "True" || evt.alert_triggered === "true";
 
-    item.className = `event-item ${isAppeared ? "appeared" : ""} ${isLeft ? "left" : ""} ${isAlert ? "alert" : ""} ${isFaceEvent || isActionChanged ? "appeared" : ""}`;
+    item.className = `event-item ${isAppeared ? "appeared" : ""} ${isLeft ? "left" : ""} ${isAlert ? "alert" : ""} ${isFaceEvent || isActionChanged ? "appeared" : ""} ${isVehicle ? "appeared" : ""} ${isVehicleIdle ? "alert" : ""}`;
 
     // Format timestamp
     const ts = parseFloat(evt.timestamp);
@@ -106,7 +108,20 @@ function renderEvent(evt) {
     const displayName = evt.identity_name || evt.person_id;
     const idSuffix = evt.identity_name ? ` (${evt.person_id})` : "";
 
-    if (evt.event_type === "person_identified") {
+    if (isVehicle || isVehicleIdle) {
+        // Vehicle event — show vehicle-specific icon and info
+        const vClass = evt.vehicle_class || "vehicle";
+        const vConf = evt.vehicle_confidence ? parseFloat(evt.vehicle_confidence) : 0;
+        const vehicleIcons = { car: "🚗", truck: "🚛", motorcycle: "🏍️", bus: "🚌" };
+        icon = isVehicleIdle ? "🚨" : (vehicleIcons[vClass] || "🚗");
+        if (isVehicleIdle) {
+            title = `Vehicle Idling — ${vClass.charAt(0).toUpperCase() + vClass.slice(1)}`;
+            meta = `${time} · ⏱️ ${evt.duration}s · ${(vConf * 100).toFixed(0)}% confidence${evt.zone ? ` · 📍${evt.zone}` : ""} · 🚨 Alert`;
+        } else {
+            title = `Vehicle Detected — ${vClass.charAt(0).toUpperCase() + vClass.slice(1)}`;
+            meta = `${time} · ${(vConf * 100).toFixed(0)}% confidence${evt.zone ? ` · 📍${evt.zone}` : ""}${isAlert ? " · 🚨 Alert" : ""}`;
+        }
+    } else if (evt.event_type === "person_identified") {
         icon = "👤";
         title = `Person Identified — ${displayName}`;
         meta = `${time} · ${evt.person_id} recognized as ${evt.identity_name}${evt.action && evt.action !== "unknown" ? ` · ${evt.action}` : ""}`;
@@ -134,7 +149,13 @@ function renderEvent(evt) {
     let photoHtml = "";
     const identityName = evt.identity_name || (evt.event_type === "face_enrolled" ? evt.person_id : null);
 
-    if (identityName && _faceIdCache[identityName]) {
+    if ((isVehicle || isVehicleIdle) && evt.snapshot_key) {
+        // Vehicle snapshot from Redis
+        const snapshotUrl = `/api/vehicles/snapshot/${encodeURIComponent(evt.snapshot_key)}`;
+        const caption = `Vehicle — ${evt.vehicle_class || "unknown"}`;
+        photoHtml = `<img class="event-photo" src="${snapshotUrl}" alt="${caption}" onclick="_openEventPhoto('${snapshotUrl}', '${caption.replace(/'/g, "\\'")}')"
+            onerror="this.style.display='none'">`;
+    } else if (identityName && _faceIdCache[identityName]) {
         // Known person — use enrolled face photo
         const fid = _faceIdCache[identityName];
         const photoUrl = `/api/faces/${fid}/photo`;

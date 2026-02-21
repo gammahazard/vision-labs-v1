@@ -17,6 +17,7 @@ An event-driven, microservices-based security camera system that detects people,
 | **Face recognition** | InsightFace `buffalo_l` generates 512-dim embeddings, cosine-matched against enrolled faces |
 | **Zone-based alerting** | Draw polygonal zones on the camera view, set time-based alert rules (always, night only, dead zone) |
 | **Telegram notifications** | Real-time photo alerts when people are detected or identified |
+| **Vehicle detection** | YOLOv8s detects cars, trucks, buses, motorcycles — snapshot + event feed |
 | **Self-learning** *(coming soon)* | User feedback trains an alert scoring model -- fewer false alarms over time |
 
 ---
@@ -28,12 +29,13 @@ Camera (RTSP)
     |
     v
 Ingester --> Redis Streams --> YOLO Pose Detector --> Tracker --> Events
+                           --> YOLO Vehicle Detector -------^
                            --> InsightFace --> Face Identity
                            --> Dashboard (WebSocket --> Browser)
                            --> Telegram Notifications
 ```
 
-Six containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
+Seven containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
 
 | Service | Purpose | GPU? |
 |---------|---------|------|
@@ -41,6 +43,7 @@ Six containerized services communicate through Redis Streams -- no direct inter-
 | **camera-ingester** | RTSP decode -> JPEG -> Redis | No |
 | **pose-detector** | YOLOv8s-pose inference | Yes |
 | **tracker** | Person ID assignment + event generation | No |
+| **vehicle-detector** | YOLOv8s vehicle detection (car/truck/bus/motorcycle) | Yes |
 | **face-recognizer** | InsightFace embedding + enrollment API | Yes |
 | **dashboard** | FastAPI + WebSocket + static frontend | No |
 
@@ -115,7 +118,7 @@ The web dashboard is accessible from any device on your LAN at port 8080. No app
 ### Features
 
 - **Live camera feed** -- real-time JPEG streaming via WebSocket with detection overlays
-- **Bounding boxes** -- green for unknown, cyan for identified people, with action labels
+- **Bounding boxes** -- green for unknown, cyan for identified people, orange for vehicles, with action labels
 - **Keypoint overlay** -- 17-point COCO pose skeleton rendered on each person
 - **Event feed** -- scrolling list of detection events with inline face photo thumbnails
 - **Zone editor** -- draw polygonal zones directly on the camera feed with drag-to-edit vertices, set alert levels per zone
@@ -200,6 +203,7 @@ When configured with a Telegram bot token, the system sends real-time alerts wit
 |-------|---------------|----------|
 | Person detected | Yes (1/min) | Camera snapshot |
 | Person identified | No | Camera snapshot + name |
+| Vehicle idle | Yes (1/min) | Camera snapshot |
 | Face enrolled | No | Face thumbnail |
 
 ---
@@ -245,6 +249,7 @@ A lightweight scoring model (logistic regression -- no GPU needed) trains on ~12
 | Phase 5 | Face recognition + enrollment wizard + unknown gallery | Done |
 | Phase 6 | Zone editor + time-based alert rules + Telegram notifications | Done |
 | Phase 6.1 | Dashboard authentication (login, sessions, password change) | Done |
+| Phase 6.2 | Vehicle detection (car/truck/bus/motorcycle) + event feed | Done |
 | **Phase 6.5** | **Self-learning feedback loop (Telegram buttons, review queue, scoring)** | **Next** |
 | Phase 7 | LLM brain -- Ollama + Mistral 7B for event narration, daily summaries, chat | Planned |
 | Phase 8 | OpenPLC integration -- Modbus TCP bridge, ladder logic decisions | Planned |
@@ -268,8 +273,9 @@ Bridges AI detections to industrial PLC ladder logic:
 ### Additional Features (All Just Redis Workers)
 
 - Event clip recording (10s clips around detections, archived to NAS)
-- Vehicle detection + speed estimation
+- Vehicle speed estimation
 - License plate reader (YOLO + PaddleOCR)
+- Vehicle re-identification (same car tracking across visits)
 - Cross-camera person tracking
 - TensorRT optimization for higher throughput
 - Additional cameras (zero code changes -- just add a docker-compose entry)
@@ -295,10 +301,11 @@ Bridges AI detections to industrial PLC ladder logic:
 | Model | VRAM |
 |-------|------|
 | YOLOv8s-pose | ~500 MB |
+| YOLOv8s (vehicles) | ~500 MB |
 | InsightFace buffalo_l | ~600 MB |
-| **Current total** | **~1.1 GB** |
+| **Current total** | **~1.6 GB** |
 | + Mistral 7B Q4 (Phase 7) | +4,500 MB |
-| **Future total** | **~5.6 GB** |
+| **Future total** | **~6.1 GB** |
 
 Fits comfortably on any modern NVIDIA GPU (4GB+ for current, 8GB+ with LLM).
 
@@ -309,7 +316,7 @@ Fits comfortably on any modern NVIDIA GPU (4GB+ for current, 8GB+ with LLM).
 ```
 vision-labs/
 |-- .env.example                  # Environment template (copy to .env)
-|-- docker-compose.yml            # All 6 services orchestrated
+|-- docker-compose.yml            # All 7 services orchestrated
 |-- ARCHITECTURE.md               # Full technical deep dive
 |-- v2.md                         # Phased build plan with design rationale
 |
@@ -324,6 +331,7 @@ vision-labs/
 |   |-- pose-detector/            # YOLOv8s-pose inference (GPU)
 |   |-- tracker/                  # Person ID assignment + event publishing
 |   |-- face-recognizer/          # InsightFace + enrollment REST API (GPU)
+|   |-- vehicle-detector/         # YOLOv8s vehicle detection (GPU)
 |   +-- dashboard/                # FastAPI backend + static frontend
 |       |-- server.py             # App factory, WebSocket handler, middleware
 |       |-- routes/               # Modular API endpoints (events, faces, zones, auth, etc.)
@@ -334,7 +342,8 @@ vision-labs/
     |-- test_time_rules.py        # Sunrise/sunset + time period logic
     |-- test_face_db.py           # Face database operations
     |-- test_tracker.py           # IoU matching + person tracking
-    +-- test_routes.py            # Dashboard API endpoint tests
+    |-- test_routes.py            # Dashboard API endpoint tests
+    +-- test_vehicles.py          # Vehicle pipeline tests
 ```
 
 ---

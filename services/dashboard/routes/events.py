@@ -30,7 +30,7 @@ async def get_events(count: int = 50):
         events_raw = ctx.r.xrevrange(ctx.EVENT_STREAM, count=count)
         events = []
         for event_id, data in events_raw:
-            events.append({
+            evt = {
                 "id": event_id,
                 "event_type": data.get("event_type", ""),
                 "person_id": data.get("person_id", ""),
@@ -44,7 +44,12 @@ async def get_events(count: int = 50):
                 "alert_triggered": data.get("alert_triggered", "false"),
                 "prev_action": data.get("prev_action", ""),
                 "identity_name": data.get("identity_name", ""),
-            })
+                # Vehicle-specific fields (empty for non-vehicle events)
+                "vehicle_class": data.get("vehicle_class", ""),
+                "vehicle_confidence": data.get("vehicle_confidence", ""),
+                "snapshot_key": data.get("snapshot_key", ""),
+            }
+            events.append(evt)
         return {"events": events}
     except redis.ConnectionError:
         return JSONResponse(status_code=503, content={"error": "Redis unavailable"})
@@ -66,4 +71,28 @@ async def get_event_snapshot(event_id: str):
         data = f.read()
 
     return Response(content=data, media_type="image/jpeg")
+
+
+@router.get("/vehicles/snapshot/{key:path}")
+async def get_vehicle_snapshot(key: str):
+    """
+    Serve a vehicle snapshot stored in Redis by the tracker.
+
+    Vehicle snapshots are stored with a 24h TTL in Redis keys like:
+    vehicle_snapshot:{camera_id}:{timestamp}
+    """
+    try:
+        # Use a raw-bytes Redis client (ctx.r has decode_responses=True
+        # which would corrupt binary JPEG data)
+        r_bin = redis.Redis(
+            host=ctx.r.connection_pool.connection_kwargs.get("host", "127.0.0.1"),
+            port=ctx.r.connection_pool.connection_kwargs.get("port", 6379),
+            decode_responses=False,
+        )
+        data = r_bin.get(key)
+        if not data:
+            return JSONResponse(status_code=404, content={"error": "Snapshot expired or not found"})
+        return Response(content=data, media_type="image/jpeg")
+    except redis.ConnectionError:
+        return JSONResponse(status_code=503, content={"error": "Redis unavailable"})
 

@@ -74,7 +74,7 @@ async def label_unknown(uid: int, data: dict):
                         "event_type": "person_identified",
                         "person_id": f"unknown_{uid}",
                         "identity_name": name,
-                        "camera_id": "front_door",
+                        "camera_id": ctx.CAMERA_ID,
                         "action": "labeled",
                         "timestamp": str(time.time()),
                     })

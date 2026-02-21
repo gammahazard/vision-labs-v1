@@ -1,7 +1,7 @@
 # Vision Labs — Architecture Reference
 
 > **Last updated:** Feb 20, 2026
-> **Status:** Phases 0–6.1 complete. Next: Phase 6.5 (Self-Learning Feedback Loop).
+> **Status:** Phases 0–6.2 complete. Next: Phase 6.5 (Self-Learning Feedback Loop).
 > **Hardware:** RTX 3090 PC, Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
 
 This document is the definitive reference for how the system works. If you lose context, start here.
@@ -48,7 +48,7 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
 - **Loose coupling:** Services communicate only via Redis streams/hashes — no direct calls (except dashboard → face-recognizer HTTP proxy)
 - **Hot-reload:** Config changes from the dashboard propagate via Redis — no restarts needed
 - **Fault isolation:** Any service can crash without taking down the pipeline
-- **GPU budget:** YOLOv8s-pose (~500MB) + InsightFace buffalo_l (~600MB) = ~1.1GB of 24GB VRAM
+- **GPU budget:** YOLOv8s-pose (~500MB) + YOLOv8s vehicles (~500MB) + InsightFace buffalo_l (~600MB) = ~1.6GB of 24GB VRAM
 
 ---
 
@@ -114,6 +114,7 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
 | **camera-ingester** | vision-labsv1-camera-ingester-1 | — | No | RTSP decode → JPEG → Redis |
 | **pose-detector** | vision-labsv1-pose-detector-1 | — | Yes | YOLOv8s-pose inference |
 | **tracker** | vision-labsv1-tracker-1 | — | No | Person tracking + event generation |
+| **vehicle-detector** | vision-labsv1-vehicle-detector-1 | — | Yes | YOLOv8s vehicle detection |
 | **face-recognizer** | vision-labsv1-face-recognizer-1 | 8081 | Yes | InsightFace embedding + REST API |
 | **dashboard** | vision-labsv1-dashboard-1 | 8080 | No | FastAPI + WebSocket + static frontend |
 
@@ -125,7 +126,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 | Key | Type | Producer | Consumer(s) | Data Shape |
 |-----|------|----------|-------------|------------|
-| `frames:{camera_id}` | Stream | camera-ingester | pose-detector, face-recognizer, dashboard | `{frame: JPEG bytes, timestamp: float, frame_number: int, resolution: "WxH"}` |
+| `frames:{camera_id}` | Stream | camera-ingester | pose-detector, vehicle-detector, face-recognizer, dashboard | `{frame: JPEG bytes, timestamp: float, frame_number: int, resolution: "WxH"}` |
 | `detections:pose:{camera_id}` | Stream | pose-detector | tracker, face-recognizer | `{detections: JSON[{bbox, confidence, keypoints}], inference_ms, frame_number}` |
 | `events:{camera_id}` | Stream | tracker | dashboard, notification poller | `{event_type, person_id, timestamp, duration, direction, action, zone, alert_level, alert_triggered, identity_name}` |
 | `state:{camera_id}` | Hash | tracker | dashboard WebSocket | `{num_people, persons: JSON[{person_id, bbox, action, ...}]}` |
@@ -133,6 +134,8 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `zones:{camera_id}` | Hash | dashboard | tracker, dashboard overlay | `{zone_id: JSON{name, points, alert_level}}` |
 | `identities:{camera_id}` | Stream | face-recognizer | dashboard | `{identities: JSON[{name, bbox, confidence}]}` |
 | `identity_state:{camera_id}` | Hash | face-recognizer | tracker, dashboard | `{identities: JSON[{name, bbox, confidence}]}` |
+| `detections:vehicle:{camera_id}` | Stream | vehicle-detector | tracker | `{detections: JSON[{bbox, confidence, class_name, class_id}], detector_type: "vehicle", inference_ms, frame_bytes}` |
+| `vehicle_snapshot:{camera_id}:{ts}` | String (TTL 24h) | tracker | dashboard | Raw JPEG bytes |
 
 **Default camera_id:** `front_door`
 
@@ -181,7 +184,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
    - XREVRANGE frames (latest 1)
    - XREVRANGE detections (latest 1)
    - HGETALL state + identity_state
-   - Draw bounding boxes (cyan=identified, green=unknown)
+   - Draw bounding boxes (cyan=identified, green=unknown, orange=vehicle)
    - Draw keypoints, zone overlays
    - JPEG encode → base64 → send JSON via WebSocket
    - Target: 10 FPS to browser
@@ -269,6 +272,18 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - **Hot-reload:** Reads `confidence_thresh` from `config:{camera_id}` every 25 frames
 - **YOLO clip_boxes bug:** Documented in v2.md — x-coords clamp to height instead of width
 
+### vehicle-detector (`services/vehicle-detector/detector.py`)
+
+**270 lines.** GPU service. Mirrors pose-detector architecture.
+
+- **Model:** YOLOv8s (general object detection, auto-downloaded, cached in Docker volume `yolo-models`)
+- **Consumer group:** `vehicle_detectors` — reads from same frame stream as pose-detector
+- **Class filter:** COCO classes 2 (car), 3 (motorcycle), 5 (bus), 7 (truck) — filtered at inference time
+- **Frame skip:** Default 3 (processes every 3rd frame to save GPU for fast-moving vehicles)
+- **Output:** For each vehicle: `{bbox: [x1,y1,x2,y2], confidence: float, class_name: str, class_id: int}`
+- **Snapshot:** Includes raw frame bytes in detection message for tracker to save as vehicle snapshot
+- **VRAM:** ~500 MB on RTX 3090
+
 ### tracker (`services/tracker/tracker.py`)
 
 **640 lines.** CPU-only, most complex service.
@@ -337,7 +352,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### Backend (`services/dashboard/server.py`)
 
-**610 lines.** FastAPI with modular routes.
+**~765 lines.** FastAPI with modular routes.
 
 **Startup sequence:**
 1. Initialize auth SQLite database (create default admin/admin if empty)
@@ -479,7 +494,7 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 
 ### docker-compose.yml
 
-6 services, 5 named volumes:
+7 services, 6 named volumes:
 
 | Volume | Mount Point | Purpose |
 |--------|-------------|---------|
@@ -487,7 +502,8 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 | `face-data` | `/data` (face-recognizer) | SQLite face DB + unknowns |
 | `yolo-models` | `/root/.config/Ultralytics` | YOLOv8 model cache |
 | `insightface-models` | `/root/.insightface` | InsightFace buffalo_l cache |
-| `auth-data` | `/data` (dashboard) | Auth SQLite database + event snapshots (`/data/snapshots/`) |
+| `auth-data` | `/data` (dashboard) | Auth SQLite database |
+| `snapshot-data` | `/data/snapshots` (dashboard) | Event + vehicle snapshots (persists across container restarts) |
 
 ### Shared Contract Mounting
 
@@ -533,6 +549,8 @@ All tests in `tests/`. Run with: `pytest tests/ -v`
 | `test_time_rules.py` | `contracts/time_rules.py` | All 4 time periods, `should_alert()` matrix, `point_in_polygon()` edge cases |
 | `test_face_db.py` | `face_db.py` | Enroll, match, delete, unknowns, dedup, reconciliation, max limit |
 | `test_tracker.py` | `tracker.py` | IoU computation, TrackedPerson state, PersonTracker.update(), debounce |
+| `test_routes.py` | `routes/*.py` | Dashboard API endpoints: zones, config, events, auth, notifications (mocked Redis) |
+| `test_vehicles.py` | Vehicle pipeline | Vehicle events, snapshot storage, idle detection, browse API |
 
 ---
 
@@ -548,7 +566,8 @@ All tests in `tests/`. Run with: `pytest tests/ -v`
 | **5: Face ReID** | ✅ Complete | InsightFace buffalo_l, multi-angle enrollment, sticky identity, unknowns |
 | **6: Zones + Alerts** | ✅ Complete | Zone drawing, time rules, dead zones, Telegram notifications. Remaining: event clip recording |
 | **6.1: Auth** | ✅ Complete | Login page, cookie sessions, change password |
-| **6.5: Self-Learning** | 📋 NOT STARTED | Feedback DB, Telegram inline buttons, review queue, alert scoring |
+| **6.2: Vehicles** | ✅ Complete | YOLOv8s vehicle detection, snapshots, idle alerts, live overlay bboxes |
+| **6.5: Self-Learning** | 📋 NOT STARTED | Feedback DB, Telegram inline buttons, suppression engine, notification prefs |
 | **7: LLM Brain** | 📋 NOT STARTED | Ollama + Mistral 7B for narration, summaries, chat |
 | **8: OpenPLC** | 📋 NOT STARTED | Modbus bridge, ladder logic automation |
 
@@ -630,7 +649,7 @@ vision-labsv1/
 ├── .gitignore                    # Python, Docker, IDE ignores
 ├── ARCHITECTURE.md               # THIS FILE
 ├── README.md                     # Project overview
-├── docker-compose.yml            # All 6 services + 5 volumes
+├── docker-compose.yml            # All 7 services + 6 volumes
 ├── v1.md                         # Original brainstorm (79KB)
 ├── v2.md                         # Refined build plan (47KB)
 │
@@ -664,7 +683,7 @@ vision-labsv1/
 │   │
 │   └── dashboard/
 │       ├── Dockerfile
-│       ├── server.py             # FastAPI + WebSocket (610 lines)
+│       ├── server.py             # FastAPI + WebSocket (~765 lines)
 │       ├── requirements.txt
 │       ├── routes/
 │       │   ├── __init__.py       # Shared state container
@@ -692,5 +711,7 @@ vision-labsv1/
     ├── test_actions.py           # Action classifier tests
     ├── test_time_rules.py        # Time rules + PIP tests
     ├── test_face_db.py           # Face DB integration tests
-    └── test_tracker.py           # Tracker algorithm tests
+    ├── test_tracker.py           # Tracker algorithm tests
+    ├── test_routes.py            # Dashboard API endpoint tests
+    └── test_vehicles.py          # Vehicle pipeline tests
 ```

@@ -61,6 +61,34 @@ let ws = null;
 let frameCount = 0;
 let lastFpsTime = Date.now();
 let currentFps = 0;
+let currentStreamMode = "sd"; // "sd" or "hd"
+
+/**
+ * Toggle between SD (with detection overlays) and HD (raw main stream).
+ * Sends a WebSocket message to the server to switch modes.
+ */
+function toggleStreamMode() {
+    const newMode = currentStreamMode === "sd" ? "hd" : "sd";
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: "switch_stream", stream: newMode }));
+        currentStreamMode = newMode;
+        _updateStreamToggleBtn();
+    }
+}
+
+function _updateStreamToggleBtn() {
+    const btn = document.getElementById("streamToggleBtn");
+    if (!btn) return;
+    if (currentStreamMode === "hd") {
+        btn.textContent = "HD";
+        btn.classList.add("hd-active");
+        btn.title = "Currently viewing HD main stream (no overlays) — click for SD";
+    } else {
+        btn.textContent = "SD";
+        btn.classList.remove("hd-active");
+        btn.title = "Currently viewing SD sub stream (with overlays) — click for HD";
+    }
+}
 
 /**
  * Connect to the live frame WebSocket.
@@ -301,6 +329,9 @@ function init() {
 
     // Check notification status
     checkNotificationStatus();
+
+    // Load browse panel (browse.js)
+    initBrowse();
 }
 
 // Start when DOM is ready

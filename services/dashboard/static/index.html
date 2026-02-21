@@ -45,6 +45,8 @@
                 <h2>📹 Live View — Front Door</h2>
                 <div class="live-view-controls">
                     <div class="live-badge" id="liveBadge">● LIVE</div>
+                    <button class="stream-toggle-btn" id="streamToggleBtn" onclick="toggleStreamMode()"
+                        title="Switch between SD (with overlays) and HD (raw main stream)">SD</button>
                     <button class="zone-toggle-btn" id="zoneToggleBtn" onclick="toggleZoneMode()">🔲 Draw Zone</button>
                 </div>
             </div>
@@ -249,6 +251,19 @@
                 </div>
             </section>
 
+            <!-- Browse Panel -->
+            <section class="panel browse-panel collapsed" id="browsePanel">
+                <div class="panel-header" onclick="togglePanel(this)">
+                    <h2>📁 Browse</h2>
+                    <div style="display:flex;align-items:center;gap:6px;"><span class="panel-toggle">▼</span></div>
+                </div>
+                <div class="panel-body">
+                    <div id="browseContent">
+                        <div class="empty-state">Loading snapshots…</div>
+                    </div>
+                </div>
+            </section>
+
             <!-- Account -->
             <section class="panel account-panel collapsed" id="accountPanel">
                 <div class="panel-header" onclick="togglePanel(this)">
@@ -397,6 +412,7 @@
     <script src="unknowns.js?v=7"></script>
     <script src="zones.js?v=7"></script>
     <script src="conditions.js?v=6"></script>
+    <script src="browse.js?v=1"></script>
     <script src="auth.js?v=6"></script>
     <script src="app.js?v=7"></script>
 </body>

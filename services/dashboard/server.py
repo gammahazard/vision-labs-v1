@@ -31,6 +31,7 @@ import json
 import os
 import time
 import logging
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -50,6 +51,8 @@ from streams import (
     CONFIG_KEY as _CFG_TMPL,
     IDENTITY_KEY as _IDKEY_TMPL,
     ZONE_KEY as _ZONE_TMPL,
+    HD_FRAME_KEY as _HD_TMPL,
+    VEHICLE_STREAM as _VEH_DET_TMPL,
     stream_key,
 )
 
@@ -92,6 +95,8 @@ STATE_KEY = stream_key(_STATE_TMPL, camera_id=CAMERA_ID)
 CONFIG_KEY = stream_key(_CFG_TMPL, camera_id=CAMERA_ID)
 IDENTITY_KEY = stream_key(_IDKEY_TMPL, camera_id=CAMERA_ID)
 ZONE_KEY = stream_key(_ZONE_TMPL, camera_id=CAMERA_ID)
+HD_FRAME_KEY = stream_key(_HD_TMPL, camera_id=CAMERA_ID)
+VEHICLE_DET_STREAM = stream_key(_VEH_DET_TMPL, camera_id=CAMERA_ID)
 
 # Default config values (written to Redis on first startup if not present)
 DEFAULT_CONFIG = {
@@ -141,6 +146,12 @@ route_ctx.IDENTITY_KEY = IDENTITY_KEY
 route_ctx.ZONE_KEY = ZONE_KEY
 route_ctx.AUTH_DB_PATH = AUTH_DB_PATH
 
+# Vehicle snapshot disk storage (day-organized)
+VEHICLE_SNAPSHOT_DIR = os.path.join(os.environ.get("SNAPSHOT_DIR", "/data/snapshots"), "vehicles")
+os.makedirs(VEHICLE_SNAPSHOT_DIR, exist_ok=True)
+route_ctx.VEHICLE_SNAPSHOT_DIR = VEHICLE_SNAPSHOT_DIR
+route_ctx.CAMERA_ID = CAMERA_ID
+
 from routes.events import router as events_router
 from routes.config import router as config_router
 from routes.conditions import router as conditions_router
@@ -149,6 +160,7 @@ from routes.unknowns import router as unknowns_router
 from routes.zones import router as zones_router
 from routes.notifications import router as notifications_router
 from routes.auth import router as auth_router, init_auth_db, validate_session
+from routes.browse import router as browse_router
 
 app.include_router(events_router)
 app.include_router(config_router)
@@ -158,6 +170,7 @@ app.include_router(unknowns_router)
 app.include_router(zones_router)
 app.include_router(notifications_router)
 app.include_router(auth_router)
+app.include_router(browse_router)
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +243,7 @@ async def _event_notification_poller():
     """
     from routes.notifications import (
         notify_person_detected, notify_person_identified,
-        is_configured, get_latest_frame,
+        notify_vehicle_idle, is_configured, get_latest_frame,
     )
 
     # Ensure snapshot directory exists
@@ -239,7 +252,7 @@ async def _event_notification_poller():
     SNAPSHOT_MAX_AGE = 7200  # 2 hours
 
     last_id = "$"  # Only process new events from this point forward
-    logger.info(f"Event poller started — snapshots → {SNAPSHOT_DIR}")
+    logger.info(f"Event poller started — snapshots → {SNAPSHOT_DIR}, vehicles → {VEHICLE_SNAPSHOT_DIR}")
 
     loop = asyncio.get_event_loop()
 
@@ -267,6 +280,36 @@ async def _event_notification_poller():
         except Exception:
             pass
 
+    def _save_vehicle_snapshot(snapshot_key: str, event_data: dict):
+        """
+        Pull vehicle snapshot JPEG from Redis and save to disk.
+        Organized as: vehicles/YYYY-MM-DD/HH-MM-SS_class.jpg
+        """
+        try:
+            # Use a separate raw-bytes Redis client (decode_responses=False)
+            r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+            jpeg_data = r_bin.get(snapshot_key.encode() if isinstance(snapshot_key, str) else snapshot_key)
+            if not jpeg_data:
+                return
+
+            # Parse timestamp from event data
+            ts = float(event_data.get("timestamp", time.time()))
+            dt = datetime.fromtimestamp(ts)
+            day_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H-%M-%S")
+            vehicle_class = event_data.get("vehicle_class", "vehicle")
+
+            # Create day folder and write file
+            day_dir = os.path.join(VEHICLE_SNAPSHOT_DIR, day_str)
+            os.makedirs(day_dir, exist_ok=True)
+            path = os.path.join(day_dir, f"{time_str}_{vehicle_class}.jpg")
+            with open(path, "wb") as f:
+                f.write(jpeg_data)
+
+            logger.debug(f"Vehicle snapshot saved: {path}")
+        except Exception as e:
+            logger.debug(f"Vehicle snapshot save failed: {e}")
+
     cleanup_counter = 0
 
     while True:
@@ -291,6 +334,24 @@ async def _event_notification_poller():
                         elif event_type == "person_identified":
                             if is_configured():
                                 await notify_person_identified(data)
+
+                        elif event_type == "vehicle_detected":
+                            # Save vehicle snapshot to disk in day folder
+                            snapshot_key = data.get("snapshot_key", "")
+                            if snapshot_key:
+                                await loop.run_in_executor(
+                                    None, _save_vehicle_snapshot, snapshot_key, data
+                                )
+
+                        elif event_type == "vehicle_idle":
+                            # Save snapshot to disk + send Telegram notification
+                            snapshot_key = data.get("snapshot_key", "")
+                            if snapshot_key:
+                                await loop.run_in_executor(
+                                    None, _save_vehicle_snapshot, snapshot_key, data
+                                )
+                            if is_configured():
+                                await notify_vehicle_idle(data)
 
             # Periodic cleanup every ~100 iterations (~200s)
             cleanup_counter += 1
@@ -331,13 +392,57 @@ async def websocket_live(ws: WebSocket):
     target_fps = 10  # Dashboard FPS (higher than ingester for smooth playback)
     frame_interval = 1.0 / target_fps
 
+    # Stream mode — "sd" (default, with overlays) or "hd" (raw main stream)
+    stream_mode = "sd"
+
     try:
         while True:
             loop_start = time.time()
 
+            # --- Check for incoming messages (non-blocking) ---
             try:
+                msg_raw = await asyncio.wait_for(ws.receive_text(), timeout=0.001)
+                try:
+                    msg = json.loads(msg_raw)
+                    if msg.get("action") == "switch_stream":
+                        new_mode = msg.get("stream", "sd")
+                        if new_mode in ("sd", "hd"):
+                            stream_mode = new_mode
+                            logger.info(f"WebSocket stream mode: {stream_mode}")
+                            await ws.send_json({"type": "stream_mode", "mode": stream_mode})
+                except json.JSONDecodeError:
+                    pass
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                # === HD MODE: serve raw high-res frame from Redis key ===
+                if stream_mode == "hd":
+                    hd_bytes = r_bin.get(HD_FRAME_KEY)
+                    if not hd_bytes:
+                        # No HD frame available — fall back briefly
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    frame_b64 = base64.b64encode(hd_bytes).decode("ascii")
+                    await ws.send_json({
+                        "type": "frame",
+                        "frame": frame_b64,
+                        "frame_number": "0",
+                        "num_detections": 0,
+                        "inference_ms": "--",
+                        "num_people": "--",
+                        "timestamp": time.time(),
+                        "hd": True,
+                    })
+
+                    elapsed = time.time() - loop_start
+                    await asyncio.sleep(max(0, frame_interval - elapsed))
+                    continue
+
+                # === SD MODE: normal frame with detection overlays ===
+
                 # Get the latest frame from the stream
-                # Use XREVRANGE to get the most recent frame (not consumer group)
                 frames = r_bin.xrevrange(FRAME_STREAM, count=1)
                 if not frames:
                     await asyncio.sleep(0.1)
@@ -492,6 +597,46 @@ async def websocket_live(ws: WebSocket):
                             if len(kp) >= 3 and kp[2] > 0.3:  # Confidence > 30%
                                 cx, cy = int(kp[0]), int(kp[1])
                                 cv2.circle(frame, (cx, cy), 3, (0, 200, 255), -1)
+
+                # Draw vehicle bounding boxes (orange)
+                try:
+                    veh_raw = r_bin.xrevrange(
+                        VEHICLE_DET_STREAM.encode(), count=1
+                    )
+                    if veh_raw:
+                        veh_data = veh_raw[0][1]
+                        veh_json = veh_data.get(b"detections", b"[]").decode()
+                        veh_detections = json.loads(veh_json)
+                        for vdet in veh_detections:
+                            vbbox = vdet.get("bbox", [])
+                            vconf = vdet.get("confidence", 0)
+                            vclass = vdet.get("class_name", "vehicle")
+                            if len(vbbox) == 4:
+                                vx1, vy1, vx2, vy2 = [int(v) for v in vbbox]
+                                vcolor = (0, 140, 255)  # Orange (BGR)
+                                vlabel = f"{vclass} {vconf:.0%}"
+                                cv2.rectangle(frame, (vx1, vy1), (vx2, vy2), vcolor, 2)
+                                vlabel_size = cv2.getTextSize(
+                                    vlabel, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+                                )[0]
+                                cv2.rectangle(
+                                    frame,
+                                    (vx1, vy1 - vlabel_size[1] - 10),
+                                    (vx1 + vlabel_size[0] + 4, vy1),
+                                    vcolor,
+                                    -1,
+                                )
+                                cv2.putText(
+                                    frame,
+                                    vlabel,
+                                    (vx1 + 2, vy1 - 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.6,
+                                    (0, 0, 0),
+                                    2,
+                                )
+                except Exception:
+                    pass  # Vehicle stream may not be available
 
                 # Draw zone overlays on the frame
                 try:

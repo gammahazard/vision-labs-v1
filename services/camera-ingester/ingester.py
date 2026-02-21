@@ -33,27 +33,32 @@ import sys
 import time
 import signal
 import logging
+import threading
 
 import cv2
 import redis
 
 # Import stream key definitions from contracts (single source of truth)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "contracts"))
-from streams import FRAME_STREAM as _FRAME_TMPL, stream_key
+from streams import FRAME_STREAM as _FRAME_TMPL, HD_FRAME_KEY as _HD_TMPL, stream_key
 
 # ---------------------------------------------------------------------------
 # Configuration from environment variables
 # ---------------------------------------------------------------------------
 CAMERA_ID = os.getenv("CAMERA_ID", "front_door")
 RTSP_URL = os.getenv("RTSP_URL", "")
+RTSP_MAIN_URL = os.getenv("RTSP_MAIN", "")  # High-res main stream for HD viewing
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 TARGET_FPS = int(os.getenv("TARGET_FPS", "5"))
+HD_TARGET_FPS = int(os.getenv("HD_TARGET_FPS", "5"))  # Lower FPS for HD to save bandwidth
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "80"))
+HD_JPEG_QUALITY = int(os.getenv("HD_JPEG_QUALITY", "85"))
 MAX_STREAM_LEN = int(os.getenv("MAX_STREAM_LEN", "1000"))
 
 # Redis Stream key — resolved from contracts/streams.py
 STREAM_KEY = stream_key(_FRAME_TMPL, camera_id=CAMERA_ID)
+HD_FRAME_KEY = stream_key(_HD_TMPL, camera_id=CAMERA_ID)
 
 # How long to wait before retrying a failed RTSP connection
 RECONNECT_DELAY_SECONDS = 5
@@ -273,7 +278,86 @@ def run():
 
 
 # ---------------------------------------------------------------------------
+# HD Stream Thread — reads RTSP main and caches latest frame in Redis
+# ---------------------------------------------------------------------------
+def run_hd_stream():
+    """
+    Background thread: reads the RTSP main stream (HD) and stores the
+    latest frame in Redis as a simple key with a short TTL.
+    The dashboard reads this key when the user switches to HD mode.
+    """
+    if not RTSP_MAIN_URL:
+        logger.info("RTSP_MAIN not set — HD stream disabled")
+        return
+
+    logger.info(f"Starting HD stream thread for '{CAMERA_ID}'")
+    r_hd = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+    frame_interval = 1.0 / HD_TARGET_FPS
+    reconnect_delay = RECONNECT_DELAY_SECONDS
+
+    while not _shutdown:
+        try:
+            cap = connect_to_camera(RTSP_MAIN_URL)
+            reconnect_delay = RECONNECT_DELAY_SECONDS
+        except Exception as e:
+            logger.warning(f"HD stream connection failed: {e}")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
+            continue
+
+        last_frame_time = 0.0
+        consecutive_failures = 0
+        hd_frame_count = 0
+
+        while not _shutdown:
+            now = time.time()
+            if now - last_frame_time < frame_interval:
+                cap.grab()
+                time.sleep(0.001)
+                continue
+
+            ret, frame = cap.read()
+            if not ret:
+                consecutive_failures += 1
+                if consecutive_failures >= 30:
+                    logger.warning("HD stream: too many failures — reconnecting")
+                    break
+                time.sleep(0.1)
+                continue
+
+            consecutive_failures = 0
+            _, jpeg_buf = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, HD_JPEG_QUALITY]
+            )
+
+            try:
+                r_hd.setex(HD_FRAME_KEY, 5, jpeg_buf.tobytes())  # 5s TTL
+            except redis.ConnectionError:
+                time.sleep(1)
+                continue
+
+            hd_frame_count += 1
+            last_frame_time = time.time()
+
+            if hd_frame_count % 100 == 0:
+                logger.info(f"HD stream: published frame #{hd_frame_count}")
+
+        cap.release()
+        if not _shutdown:
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
+
+    logger.info("HD stream thread stopped")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    # Start HD stream in a background thread
+    if RTSP_MAIN_URL:
+        hd_thread = threading.Thread(target=run_hd_stream, daemon=True)
+        hd_thread.start()
+
+    # Run the main (sub) stream ingester on the main thread
     run()

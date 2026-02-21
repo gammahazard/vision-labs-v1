@@ -39,6 +39,8 @@ const alertColors = {
     always: { fill: "rgba(239, 68, 68, 0.25)", stroke: "#ef4444", label: "🔴 Always" },
     night_only: { fill: "rgba(245, 158, 11, 0.25)", stroke: "#f59e0b", label: "🟠 Night" },
     log_only: { fill: "rgba(59, 130, 246, 0.25)", stroke: "#3b82f6", label: "🔵 Log" },
+    dead: { fill: "rgba(127, 29, 29, 0.25)", stroke: "#991b1b", label: "☠️ Dead" },
+    dead_zone: { fill: "rgba(127, 29, 29, 0.25)", stroke: "#991b1b", label: "☠️ Dead" },
     ignore: { fill: "rgba(107, 114, 128, 0.25)", stroke: "#6b7280", label: "⚫ Off" },
 };
 

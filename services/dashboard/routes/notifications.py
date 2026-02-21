@@ -213,6 +213,52 @@ async def notify_person_identified(event_data: dict):
 
 
 # ---------------------------------------------------------------------------
+# Notify on vehicle idle (rate-limited separately from person notifications)
+# ---------------------------------------------------------------------------
+_last_vehicle_idle_notification = 0.0
+VEHICLE_IDLE_RATE_LIMIT = 60  # Max 1 vehicle idle notification per 60s
+
+
+async def notify_vehicle_idle(event_data: dict):
+    """
+    Send a Telegram notification when a vehicle has been idling.
+    Rate-limited to max 1 per VEHICLE_IDLE_RATE_LIMIT seconds.
+    """
+    global _last_vehicle_idle_notification
+
+    if not is_configured():
+        return
+
+    now = time.time()
+    if now - _last_vehicle_idle_notification < VEHICLE_IDLE_RATE_LIMIT:
+        return  # Rate limited
+
+    _last_vehicle_idle_notification = now
+
+    vehicle_class = event_data.get("vehicle_class", "vehicle")
+    zone = event_data.get("zone", "")
+    duration = event_data.get("duration", "0")
+    confidence = event_data.get("vehicle_confidence", "")
+
+    parts = [f"\U0001f697 <b>Vehicle Idling</b>"]
+    parts.append(f"\u2022 Type: {vehicle_class}")
+    if zone:
+        parts.append(f"\u2022 Zone: {zone}")
+    parts.append(f"\u2022 Duration: {duration}s")
+    if confidence:
+        parts.append(f"\u2022 Confidence: {confidence}")
+    parts.append(f"\u2022 Time: {_now_str()}")
+
+    caption = "\n".join(parts)
+
+    frame = get_latest_frame()
+    if frame:
+        await send_photo(frame, caption)
+    else:
+        await send_text(caption)
+
+
+# ---------------------------------------------------------------------------
 # Notify on face enrollment
 # ---------------------------------------------------------------------------
 async def notify_face_enrolled(name: str, photo_bytes: bytes | None = None):

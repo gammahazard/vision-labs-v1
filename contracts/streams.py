@@ -80,6 +80,16 @@ IDENTITY_STREAM = "identities:{camera_id}"
 # Read by: dashboard (name overlay)
 IDENTITY_KEY = "identity_state:{camera_id}"
 
+# Vehicle detection results — separate from person detections
+# Published by: vehicle-detector
+# Consumed by: tracker (vehicle events)
+VEHICLE_STREAM = "detections:vehicle:{camera_id}"
+
+# Latest HD frame from the main camera stream (not a stream — single key)
+# Published by: camera-ingester (HD thread)
+# Consumed by: dashboard (HD live view toggle)
+HD_FRAME_KEY = "frame_hd:{camera_id}"
+
 
 def stream_key(template: str, **kwargs) -> str:
     """Resolve a stream key template with actual values.
