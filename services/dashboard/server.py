@@ -104,6 +104,12 @@ DEFAULT_CONFIG = {
     "iou_threshold": "0.3",
     "lost_timeout": "5.0",
     "target_fps": "5",
+    # Notification preferences (Phase 6.5)
+    "notify_person": "1",          # Send Telegram alerts for person detections
+    "notify_vehicle": "1",         # Send Telegram alerts for vehicle events
+    "suppress_known": "0",         # Auto-suppress alerts for known/identified people
+    "notify_cooldown": "60",       # Seconds between person notifications
+    "vehicle_cooldown": "60",      # Seconds between vehicle notifications
 }
 
 # ---------------------------------------------------------------------------
@@ -336,6 +342,12 @@ async def _event_notification_poller():
                 None, lambda: r.xread({EVENT_STREAM: last_id}, count=10, block=2000)
             )
             if entries:
+                # Read notification preferences from Redis config
+                cfg = r.hgetall(CONFIG_KEY)
+                notify_person = cfg.get("notify_person", "1") == "1"
+                notify_vehicle = cfg.get("notify_vehicle", "1") == "1"
+                suppress_known = cfg.get("suppress_known", "0") == "1"
+
                 for stream_name, messages in entries:
                     for msg_id, data in messages:
                         last_id = msg_id
@@ -344,14 +356,15 @@ async def _event_notification_poller():
                         if event_type == "person_appeared":
                             # Always save snapshot (for event feed thumbnails)
                             await loop.run_in_executor(None, _save_snapshot, msg_id)
-                            # Optionally send Telegram notification
-                            if is_configured():
+                            # Send Telegram if person notifications enabled
+                            if is_configured() and notify_person:
                                 await notify_person_detected(
                                     data, event_id=msg_id, feedback_db=fdb
                                 )
 
                         elif event_type == "person_identified":
-                            if is_configured():
+                            # Skip if suppress_known is on (known people don't alert)
+                            if is_configured() and notify_person and not suppress_known:
                                 await notify_person_identified(
                                     data, event_id=msg_id, feedback_db=fdb
                                 )
@@ -365,13 +378,13 @@ async def _event_notification_poller():
                                 )
 
                         elif event_type == "vehicle_idle":
-                            # Save snapshot to disk + send Telegram notification
+                            # Save snapshot to disk + optionally notify
                             snapshot_key = data.get("snapshot_key", "")
                             if snapshot_key:
                                 await loop.run_in_executor(
                                     None, _save_vehicle_snapshot, snapshot_key, data
                                 )
-                            if is_configured():
+                            if is_configured() and notify_vehicle:
                                 await notify_vehicle_idle(
                                     data, event_id=msg_id, feedback_db=fdb
                                 )

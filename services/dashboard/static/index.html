@@ -318,6 +318,29 @@
                     <div class="setting">
                         <p class="setting-hint" id="notifConfigHint">Checking Telegram configuration...</p>
                     </div>
+                    <!-- Notification Preferences -->
+                    <div class="setting notification-pref">
+                        <label class="toggle-row">
+                            <span>🚨 Person alerts</span>
+                            <input type="checkbox" id="notifyPersonToggle" checked
+                                onchange="updateNotifPref('notify_person', this.checked ? '1' : '0')">
+                        </label>
+                    </div>
+                    <div class="setting notification-pref">
+                        <label class="toggle-row">
+                            <span>🚗 Vehicle alerts</span>
+                            <input type="checkbox" id="notifyVehicleToggle" checked
+                                onchange="updateNotifPref('notify_vehicle', this.checked ? '1' : '0')">
+                        </label>
+                    </div>
+                    <div class="setting notification-pref">
+                        <label class="toggle-row">
+                            <span>🤫 Suppress known people</span>
+                            <input type="checkbox" id="suppressKnownToggle"
+                                onchange="updateNotifPref('suppress_known', this.checked ? '1' : '0')">
+                        </label>
+                        <p class="setting-hint">Skip alerts for people already identified by name</p>
+                    </div>
                     <div class="setting">
                         <button class="btn btn-primary" id="testNotificationBtn" onclick="testNotification()">
                             📤 Send Test Notification
@@ -325,6 +348,38 @@
                         <p class="setting-hint">Sends a test message with camera snapshot to Telegram</p>
                         <p class="notification-result" id="notifResult"
                             style="display:none;margin-top:8px;font-size:0.85rem;"></p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Feedback Review Panel -->
+            <section class="panel feedback-panel collapsed" id="feedbackPanel">
+                <div class="panel-header" onclick="togglePanel(this)">
+                    <h2>🧠 Feedback</h2>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                        <span class="face-count" id="feedbackCount">no data</span>
+                        <span class="panel-toggle">▼</span>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <!-- Stats -->
+                    <div id="feedbackStatsContent">
+                        <div class="empty-state">Loading feedback stats…</div>
+                    </div>
+                    <!-- Suppression Rules -->
+                    <div class="feedback-section">
+                        <h3 class="feedback-section-title">🛡️ Suppression Rules</h3>
+                        <p class="setting-hint">Auto-created rules that suppress repeat false alarms</p>
+                        <div id="suppressionRulesList">
+                            <div class="empty-state">Loading…</div>
+                        </div>
+                    </div>
+                    <!-- History -->
+                    <div class="feedback-section">
+                        <h3 class="feedback-section-title">📜 Recent Verdicts</h3>
+                        <div id="feedbackHistoryList">
+                            <div class="empty-state">Loading…</div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -413,8 +468,9 @@
     <script src="zones.js?v=7"></script>
     <script src="conditions.js?v=6"></script>
     <script src="browse.js?v=1"></script>
+    <script src="feedback.js?v=1"></script>
     <script src="auth.js?v=6"></script>
-    <script src="app.js?v=7"></script>
+    <script src="app.js?v=8"></script>
 </body>
 
 </html>
