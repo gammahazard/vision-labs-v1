@@ -751,7 +751,7 @@ vision-labsv1/
 │       │   ├── notifications.py  # Telegram integration
 │       │   ├── feedback.py       # Feedback + suppression rules API
 │       │   ├── browse.py          # Vehicle snapshot browser + faces gallery
-│       │   └── ai.py             # AI assistant (Ollama chat + 18 tools, ~1229 lines)
+│       │   └── ai.py             # AI assistant (Ollama chat + 18 tools, ~1420 lines)
 │       └── static/
 │           ├── index.html        # Main dashboard layout
 │           ├── ai.html           # AI assistant (onboarding + chat)

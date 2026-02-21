@@ -836,13 +836,29 @@ def _tool_capture_clip() -> str:
             _pending_clip = None
             return json.dumps({"error": "Clip capture failed — camera may be offline or not enough frames"})
 
-        # Save to disk so we can serve it via API
+        # Save raw OpenCV clip to temp file first
         clip_dir = os.path.join("/data/snapshots", "clips")
         os.makedirs(clip_dir, exist_ok=True)
         filename = f"{datetime.now(TZ_LOCAL).strftime('%Y%m%d_%H%M%S')}_{_uuid.uuid4().hex[:6]}.mp4"
         filepath = os.path.join(clip_dir, filename)
-        with open(filepath, "wb") as f:
+        raw_path = filepath + ".raw.mp4"
+        with open(raw_path, "wb") as f:
             f.write(mp4_bytes)
+
+        # Re-encode to H.264 for browser playback
+        # OpenCV's mp4v (MPEG-4 Part 2) isn't browser-compatible
+        import subprocess
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", raw_path,
+                 "-c:v", "libx264", "-preset", "ultrafast",
+                 "-movflags", "+faststart", "-an", filepath],
+                capture_output=True, timeout=15,
+            )
+            os.unlink(raw_path)
+        except Exception:
+            # Fallback: use the raw file if ffmpeg isn't available
+            os.rename(raw_path, filepath)
 
         _pending_clip = filename
 
