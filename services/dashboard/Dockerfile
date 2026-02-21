@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend code
 COPY server.py .
+COPY feedback_db.py .
 COPY routes/ routes/
 
 # Copy frontend files
