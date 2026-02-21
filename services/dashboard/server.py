@@ -413,7 +413,7 @@ async def _event_notification_poller():
     """
     from routes.notifications import (
         notify_person_detected, notify_person_identified,
-        notify_vehicle_idle, is_configured, get_latest_frame,
+        notify_vehicle_idle, is_configured, get_latest_frame, get_sd_frame,
     )
 
     # Get feedback_db reference
@@ -442,7 +442,7 @@ async def _event_notification_poller():
             r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT,
                                 decode_responses=False)
             hd_bytes = r_bin.get(HD_FRAME_KEY.encode())
-            sd_frame = get_latest_frame()
+            sd_frame = get_sd_frame()  # Always sub-stream for bbox scaling reference
 
             # Pick best available frame
             frame = hd_bytes if hd_bytes else sd_frame
