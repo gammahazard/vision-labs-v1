@@ -533,6 +533,8 @@ async def notify_vehicle_idle(event_data: dict,
                                feedback_db=None) -> int:
     """
     Send a Telegram notification when a vehicle has been idling.
+    Sends a photo snapshot immediately, then follows up with a 5-second
+    video clip for additional context.
     Rate-limited to max 1 per VEHICLE_IDLE_RATE_LIMIT seconds.
     Returns the Telegram message ID (0 if not sent).
     """
@@ -588,6 +590,21 @@ async def notify_vehicle_idle(event_data: dict,
             zone=zone, time_period=time_period,
             confidence=float(confidence) if confidence else 0.0,
         )
+
+    # --- Follow up with a 5-second video clip ---
+    try:
+        loop = asyncio.get_running_loop()
+        clip_bytes = await loop.run_in_executor(
+            None, lambda: build_clip(duration=5.0, fps=10)
+        )
+        if clip_bytes:
+            clip_caption = f"\U0001f3ac <b>Vehicle Idle Clip</b> — {vehicle_class}"
+            await send_video(clip_bytes, clip_caption)
+            logger.info(f"Vehicle idle clip sent ({len(clip_bytes) / 1024:.0f} KB)")
+        else:
+            logger.debug("build_clip returned None — skipping video")
+    except Exception as e:
+        logger.warning(f"Vehicle idle clip failed: {e}")
 
     return msg_id
 
