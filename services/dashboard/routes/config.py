@@ -41,7 +41,11 @@ async def update_config(config: dict):
     """
     try:
         # Only allow known config keys
-        allowed_keys = {"confidence_thresh", "iou_threshold", "lost_timeout", "target_fps"}
+        allowed_keys = {
+            "confidence_thresh", "iou_threshold", "lost_timeout", "target_fps",
+            "notify_person", "notify_vehicle", "suppress_known",
+            "notify_cooldown", "vehicle_cooldown",
+        }
         filtered = {k: str(v) for k, v in config.items() if k in allowed_keys}
 
         if filtered:

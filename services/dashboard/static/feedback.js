@@ -203,15 +203,16 @@ async function loadNotificationPrefs() {
     try {
         const resp = await fetch('/api/config');
         if (!resp.ok) return;
-        const cfg = await resp.json();
+        const data = await resp.json();
+        const cfg = data.config || {};
 
         // Set toggle states from config
         const personToggle = document.getElementById('notifyPersonToggle');
         const vehicleToggle = document.getElementById('notifyVehicleToggle');
         const suppressKnownToggle = document.getElementById('suppressKnownToggle');
 
-        if (personToggle) personToggle.checked = cfg.notify_person === '1';
-        if (vehicleToggle) vehicleToggle.checked = cfg.notify_vehicle === '1';
+        if (personToggle) personToggle.checked = cfg.notify_person !== '0';
+        if (vehicleToggle) vehicleToggle.checked = cfg.notify_vehicle !== '0';
         if (suppressKnownToggle) suppressKnownToggle.checked = cfg.suppress_known === '1';
     } catch (e) {
         console.debug('Load prefs error:', e);
