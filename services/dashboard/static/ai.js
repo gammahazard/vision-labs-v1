@@ -423,8 +423,8 @@ function renderMarkdown(text) {
             }
         }
 
-        // Video tag pass-through (injected by capture_clip tool)
-        if (trimmed.startsWith('<video')) {
+        // HTML tag pass-through (injected by tools: video, div galleries, figures)
+        if (/^<(video|div|figure)/.test(trimmed)) {
             html += trimmed;
             continue;
         }

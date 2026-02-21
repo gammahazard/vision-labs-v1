@@ -279,13 +279,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "browse_vehicles",
-            "description": "List vehicle detection snapshots for a given day. Shows how many vehicles were detected and their timestamps.",
+            "description": "Browse vehicle detection snapshots for a given day. Shows snapshot images inline in the chat. Use when the user asks to see vehicle photos or detections.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "date": {
                         "type": "string",
                         "description": "Date in YYYY-MM-DD format, or 'today'/'yesterday'. Defaults to today.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of recent snapshots to show (default 5, max 10)",
                     },
                 },
                 "required": [],
@@ -574,12 +578,14 @@ def _tool_query_zones() -> str:
 
 
 def _tool_browse_vehicles(args: dict) -> str:
-    """List vehicle detection snapshots for a given day."""
+    """List vehicle detection snapshots for a given day and stash images for display."""
+    global _pending_images
     from datetime import datetime, timedelta
     import os
     import glob
 
     date_str = args.get("date", "today")
+    count_requested = min(int(args.get("count", 5)), 10)  # Max 10 images
     now = datetime.now(TZ_LOCAL)
     if date_str == "today":
         target_date = now.strftime("%Y-%m-%d")
@@ -593,25 +599,46 @@ def _tool_browse_vehicles(args: dict) -> str:
 
     try:
         if not os.path.isdir(day_dir):
+            _pending_images = None
             return json.dumps({"date": target_date, "count": 0, "snapshots": [], "message": f"No vehicle snapshots for {target_date}"})
 
         files = sorted(glob.glob(os.path.join(day_dir, "*.jpg")))
         snapshots = []
         for f in files:
             basename = os.path.basename(f)
-            # Extract timestamp from filename (e.g. '1708545600_vehicle.jpg')
+            # Parse filename: HH-MM-SS_classname.jpg
+            base_name = basename.rsplit(".", 1)[0]
+            parts = base_name.split("_", 1)
+            time_str = parts[0].replace("-", ":") if parts else ""
+            vehicle_class = parts[1] if len(parts) > 1 else "vehicle"
             snapshots.append({
                 "filename": basename,
+                "time": time_str,
+                "vehicle_class": vehicle_class,
                 "size_kb": round(os.path.getsize(f) / 1024, 1),
+                "url": f"/api/browse/snapshot/{target_date}/{basename}",
             })
+
+        # Stash the last N images for inline display in the chat
+        display_snapshots = snapshots[-count_requested:]
+        if display_snapshots:
+            _pending_images = [
+                {"url": s["url"], "caption": f"{s['time']} — {s['vehicle_class']}"}
+                for s in display_snapshots
+            ]
+        else:
+            _pending_images = None
 
         return json.dumps({
             "date": target_date,
             "count": len(snapshots),
-            "snapshots": snapshots[-20:],  # Last 20
+            "snapshots": snapshots[-20:],  # Last 20 metadata
+            "images_will_be_shown": len(display_snapshots),
             "note": f"Showing last {min(20, len(snapshots))} of {len(snapshots)}" if len(snapshots) > 20 else None,
+            "instruction": "The vehicle snapshot images will be displayed inline to the user automatically. Describe the snapshots using the metadata (timestamps, vehicle classes). Do NOT try to embed the images yourself.",
         })
     except Exception as e:
+        _pending_images = None
         return json.dumps({"error": str(e)})
 
 
@@ -743,6 +770,7 @@ def _tool_query_event_patterns(args: dict) -> str:
 # into the final reply before returning it to the browser.
 _pending_snapshot: str | None = None
 _pending_clip: str | None = None  # filename on disk, served via /api/ai/clip/
+_pending_images: list[dict] | None = None  # [{url, caption}] for browse results
 
 
 async def _tool_capture_snapshot() -> str:
@@ -1356,6 +1384,24 @@ async def chat(req: ChatRequest):
             clip_html = f'<video controls autoplay muted playsinline style="max-width:100%;border-radius:8px;margin:8px 0;"><source src="{clip_url}" type="video/mp4">Your browser does not support video.</video>'
             reply = f"{clip_html}\n\n{reply}"
             _pending_clip = None
+
+        # Inject browse images (vehicle snapshots etc.) if any were stashed
+        global _pending_images
+        if _pending_images:
+            img_parts = []
+            for img in _pending_images:
+                url = img["url"]
+                cap = img.get("caption", "")
+                img_parts.append(
+                    f'<figure style="display:inline-block;margin:4px;">'
+                    f'<img src="{url}" alt="{cap}" style="max-width:280px;border-radius:8px;cursor:pointer;" '
+                    f'onclick="window.open(this.src)"/>'
+                    f'<figcaption style="text-align:center;font-size:0.8em;color:#aaa;">{cap}</figcaption>'
+                    f'</figure>'
+                )
+            gallery_html = f'<div style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;">{" ".join(img_parts)}</div>'
+            reply = f"{reply}\n\n{gallery_html}"
+            _pending_images = None
 
         # Save assistant response server-side
         _ai_db.save_message("assistant", reply)
