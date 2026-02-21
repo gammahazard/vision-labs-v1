@@ -465,8 +465,16 @@ async def notify_vehicle_idle(event_data: dict,
 
     vehicle_class = event_data.get("vehicle_class", "vehicle")
     zone = event_data.get("zone", "")
+    time_period = event_data.get("time_period", "")
     duration = event_data.get("duration", "0")
     confidence = event_data.get("vehicle_confidence", "")
+
+    # Check suppression before sending
+    if feedback_db and feedback_db.should_suppress(
+        zone=zone, time_period=time_period
+    ):
+        logger.info(f"Vehicle idle notification suppressed for event {event_id}")
+        return 0
 
     parts = [f"\U0001f697 <b>Vehicle Idling</b>"]
     parts.append(f"\u2022 Type: {vehicle_class}")
@@ -493,7 +501,8 @@ async def notify_vehicle_idle(event_data: dict,
             event_id=event_id,
             event_type="vehicle_idle",
             telegram_message_id=msg_id,
-            zone=zone, confidence=float(confidence) if confidence else 0.0,
+            zone=zone, time_period=time_period,
+            confidence=float(confidence) if confidence else 0.0,
         )
 
     return msg_id

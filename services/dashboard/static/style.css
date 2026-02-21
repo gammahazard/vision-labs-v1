@@ -282,9 +282,18 @@ main {
 }
 
 .video-container img {
-    max-width: 100%;
-    max-height: 100%;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
+}
+
+#zoneCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
 }
 
 .no-signal {
@@ -2125,6 +2134,60 @@ input[type="range"]::-moz-range-thumb {
     color: var(--text-muted);
     font-size: 11px;
     white-space: nowrap;
+}
+
+/* Clickable unnamed/pending feedback items */
+.feedback-clickable {
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dashed;
+    text-underline-offset: 2px;
+}
+
+.feedback-clickable:hover {
+    filter: brightness(1.3);
+}
+
+.feedback-item:has(.feedback-clickable):hover {
+    background: var(--bg-panel-hover);
+}
+
+/* Inline action buttons for pending items */
+.feedback-actions {
+    display: flex;
+    gap: 2px;
+    margin-left: auto;
+}
+
+.feedback-action-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 2px 6px;
+    opacity: 0.6;
+    transition: all 0.2s ease;
+}
+
+.feedback-action-btn:hover {
+    opacity: 1;
+    transform: scale(1.1);
+}
+
+.fb-real:hover {
+    background: rgba(74, 222, 128, 0.15);
+    border-color: var(--accent);
+}
+
+.fb-false:hover {
+    background: rgba(245, 158, 11, 0.15);
+    border-color: var(--warning);
+}
+
+.fb-name:hover {
+    background: rgba(6, 182, 212, 0.15);
+    border-color: var(--info);
 }
 
 /* Suppression rules */

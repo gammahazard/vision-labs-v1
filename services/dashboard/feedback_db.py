@@ -499,38 +499,54 @@ class FeedbackDB:
                         identity_label: str = "") -> bool:
         """
         Update a pending event with the user's verdict.
-        Called when user taps a Telegram inline button.
+        Called when user taps a Telegram inline button or classifies
+        from the dashboard event detail modal.
+
+        If no prior record exists (e.g., Telegram not configured),
+        creates a new feedback record so dashboard-only verdict still works.
         """
         conn = self._get_conn()
         try:
             row = conn.execute(
                 "SELECT * FROM feedback WHERE event_id = ?", (event_id,)
             ).fetchone()
-            if not row:
-                logger.warning(f"No pending event found for {event_id}")
-                return False
 
-            conn.execute(
-                """UPDATE feedback
-                   SET verdict = ?, identity_label = ?, timestamp = ?
-                   WHERE event_id = ?""",
-                (verdict, identity_label or row["identity_label"],
-                 time.time(), event_id)
-            )
+            if row:
+                # Existing record — update it
+                conn.execute(
+                    """UPDATE feedback
+                       SET verdict = ?, identity_label = ?, timestamp = ?
+                       WHERE event_id = ?""",
+                    (verdict, identity_label or row["identity_label"],
+                     time.time(), event_id)
+                )
+            else:
+                # No prior record (Telegram not configured or non-notified event)
+                # Create a new feedback record from dashboard
+                conn.execute(
+                    """INSERT INTO feedback
+                       (event_id, verdict, event_type, identity_label,
+                        timestamp, telegram_message_id)
+                       VALUES (?, ?, '', ?, ?, 0)""",
+                    (event_id, verdict, identity_label or "",
+                     time.time())
+                )
+                logger.info(f"Created new feedback record for {event_id} from dashboard")
+
             conn.commit()
 
             # Re-check auto-rules with the resolved record
             record = FeedbackRecord(
                 event_id=event_id,
                 verdict=verdict,
-                event_type=row["event_type"],
-                identity_label=identity_label or row["identity_label"],
-                zone=row["zone"],
-                time_period=row["time_period"],
-                action=row["action"],
-                confidence=row["confidence"],
-                camera_id=row["camera_id"],
-                snapshot_path=row["snapshot_path"],
+                event_type=row["event_type"] if row else "",
+                identity_label=identity_label or (row["identity_label"] if row else ""),
+                zone=row["zone"] if row else "",
+                time_period=row["time_period"] if row else "",
+                action=row["action"] if row else "",
+                confidence=row["confidence"] if row else 0.0,
+                camera_id=row["camera_id"] if row else "front_door",
+                snapshot_path=row["snapshot_path"] if row else "",
                 timestamp=time.time(),
             )
             self._check_and_create_rules(conn, record)

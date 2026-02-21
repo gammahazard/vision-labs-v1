@@ -178,6 +178,21 @@ function renderEvent(evt) {
         </div>
     `;
 
+    // Make event item clickable to show detail modal
+    item.style.cursor = "pointer";
+    item.dataset.eventId = evt.id;
+    item.dataset.eventTitle = title;
+    item.dataset.eventMeta = meta;
+    item.dataset.eventType = evt.event_type;
+    item.dataset.identityName = evt.identity_name || "";
+    item.dataset.zone = evt.zone || "";
+    item.dataset.action = evt.action || "";
+    item.addEventListener("click", function (e) {
+        // Don't open modal if clicking the photo thumbnail (it has its own lightbox)
+        if (e.target.classList.contains("event-photo")) return;
+        _openEventDetail(this.dataset);
+    });
+
     // Insert at top (newest first)
     eventList.insertBefore(item, eventList.firstChild);
 
@@ -188,6 +203,119 @@ function renderEvent(evt) {
 
     // Refresh face cache in background for future events
     if (isFaceEvent) _refreshFaceIdCache();
+}
+
+// ---------------------------------------------------------------------------
+// Event Detail Modal
+// ---------------------------------------------------------------------------
+let _eventDetailId = null;
+
+function _openEventDetail(data) {
+    _eventDetailId = data.eventId;
+    const modal = document.getElementById("eventDetailModal");
+    const titleEl = document.getElementById("eventDetailTitle");
+    const metaEl = document.getElementById("eventDetailMeta");
+    const snapshot = document.getElementById("eventDetailSnapshot");
+    const nameRow = document.getElementById("eventDetailNameRow");
+    const statusEl = document.getElementById("eventDetailStatus");
+
+    titleEl.textContent = `📋 ${data.eventTitle}`;
+
+    // Build metadata display
+    let metaHtml = `<div>${data.eventMeta}</div>`;
+    if (data.identityName) metaHtml += `<div>🏷️ Identity: <strong>${data.identityName}</strong></div>`;
+    if (data.zone) metaHtml += `<div>📍 Zone: <strong>${data.zone}</strong></div>`;
+    if (data.action && data.action !== "unknown") metaHtml += `<div>🎬 Action: <strong>${data.action}</strong></div>`;
+    metaEl.innerHTML = metaHtml;
+
+    // Load snapshot
+    snapshot.style.display = "none";
+    snapshot.src = "";
+    const snapshotUrl = `/api/events/${encodeURIComponent(data.eventId)}/snapshot`;
+    const testImg = new Image();
+    testImg.onload = () => {
+        snapshot.src = snapshotUrl;
+        snapshot.style.display = "block";
+    };
+    testImg.onerror = () => { snapshot.style.display = "none"; };
+    testImg.src = snapshotUrl;
+
+    // Reset name row and status
+    nameRow.style.display = "none";
+    statusEl.style.display = "none";
+    const nameInput = document.getElementById("eventDetailNameInput");
+    if (nameInput) nameInput.value = "";
+
+    modal.style.display = "flex";
+}
+
+function closeEventDetailModal() {
+    const modal = document.getElementById("eventDetailModal");
+    if (modal) modal.style.display = "none";
+    _eventDetailId = null;
+}
+
+async function eventDetailVerdict(verdict) {
+    if (!_eventDetailId) return;
+    const statusEl = document.getElementById("eventDetailStatus");
+    try {
+        const res = await fetch(`/api/feedback/${encodeURIComponent(_eventDetailId)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ verdict }),
+        });
+        if (res.ok) {
+            statusEl.textContent = `✅ Marked as ${verdict.replace("_", " ")}`;
+            statusEl.style.color = "#4ade80";
+            // Refresh feedback panel so verdict shows immediately
+            if (typeof loadFeedbackHistory === "function") loadFeedbackHistory();
+            if (typeof loadFeedbackStats === "function") loadFeedbackStats();
+        } else {
+            statusEl.textContent = `⚠️ ${(await res.json()).error || "Failed"}`;
+            statusEl.style.color = "#f59e0b";
+        }
+    } catch (e) {
+        statusEl.textContent = "❌ Network error";
+        statusEl.style.color = "#ef4444";
+    }
+    statusEl.style.display = "block";
+}
+
+function eventDetailNamePrompt() {
+    const nameRow = document.getElementById("eventDetailNameRow");
+    nameRow.style.display = "block";
+    const input = document.getElementById("eventDetailNameInput");
+    setTimeout(() => input.focus(), 100);
+}
+
+async function eventDetailSubmitName() {
+    if (!_eventDetailId) return;
+    const input = document.getElementById("eventDetailNameInput");
+    const name = input.value.trim();
+    if (!name) return;
+    const statusEl = document.getElementById("eventDetailStatus");
+    try {
+        const res = await fetch(`/api/feedback/${encodeURIComponent(_eventDetailId)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ verdict: "identified", identity_label: name }),
+        });
+        if (res.ok) {
+            statusEl.textContent = `✅ Named as "${name}"`;
+            statusEl.style.color = "#4ade80";
+            document.getElementById("eventDetailNameRow").style.display = "none";
+            // Refresh feedback panel so name shows immediately
+            if (typeof loadFeedbackHistory === "function") loadFeedbackHistory();
+            if (typeof loadFeedbackStats === "function") loadFeedbackStats();
+        } else {
+            statusEl.textContent = `⚠️ ${(await res.json()).error || "Failed"}`;
+            statusEl.style.color = "#f59e0b";
+        }
+    } catch (e) {
+        statusEl.textContent = "❌ Network error";
+        statusEl.style.color = "#ef4444";
+    }
+    statusEl.style.display = "block";
 }
 
 // ---------------------------------------------------------------------------

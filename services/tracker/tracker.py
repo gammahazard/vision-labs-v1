@@ -360,6 +360,7 @@ class PersonTracker:
             "zone": zone_name,
             "alert_level": alert_level,
             "alert_triggered": str(alert_triggered),
+            "time_period": get_time_period(),
         }
         if extra:
             event.update(extra)
@@ -483,6 +484,7 @@ class PersonTracker:
             "vehicle_class": veh.class_name,
             "vehicle_confidence": str(round(veh.confidence, 3)),
             "snapshot_key": veh.snapshot_key,
+            "time_period": get_time_period(),
         }
 
         self.r.xadd(EVENT_STREAM, event, maxlen=MAX_EVENT_STREAM_LEN)
@@ -518,6 +520,7 @@ class PersonTracker:
             "vehicle_class": veh.class_name,
             "vehicle_confidence": str(round(veh.confidence, 3)),
             "snapshot_key": veh.snapshot_key,
+            "time_period": get_time_period(),
         }
 
         self.r.xadd(EVENT_STREAM, event, maxlen=MAX_EVENT_STREAM_LEN)

@@ -6,10 +6,14 @@
  *   - Shows recent feedback history with inline verdict editing
  *   - Manages suppression rules (toggle, delete)
  *   - Handles notification preference toggles (person/vehicle/suppress known)
+ *   - Provides naming modal for unnamed identifications and pending events
  *
  * LOADED BY: index.html before app.js
  * API: /api/feedback, /api/feedback/stats, /api/feedback/rules
  */
+
+// Track which event we're naming
+let _feedbackNamingEventId = null;
 
 // ---------------------------------------------------------------------------
 // Feedback Stats + Review
@@ -91,6 +95,7 @@ async function loadFeedbackHistory() {
 
             let verdictBadge = '';
             let verdictClass = '';
+            let actions = '';
             switch (item.verdict) {
                 case 'real_threat':
                     verdictBadge = '✅ Real';
@@ -101,12 +106,23 @@ async function loadFeedbackHistory() {
                     verdictClass = 'verdict-false';
                     break;
                 case 'identified':
-                    verdictBadge = '👤 ' + (item.identity_label || 'Unnamed');
-                    verdictClass = 'verdict-identified';
+                    if (!item.identity_label) {
+                        verdictBadge = '👤 Unnamed';
+                        verdictClass = 'verdict-identified feedback-clickable';
+                    } else {
+                        verdictBadge = '👤 ' + item.identity_label;
+                        verdictClass = 'verdict-identified';
+                    }
                     break;
                 case 'pending':
                     verdictBadge = '⏳ Pending';
                     verdictClass = 'verdict-pending';
+                    actions = `
+                        <span class="feedback-actions">
+                            <button class="feedback-action-btn fb-real" onclick="event.stopPropagation(); quickResolve('${item.event_id}', 'real_threat')" title="Real threat">✅</button>
+                            <button class="feedback-action-btn fb-false" onclick="event.stopPropagation(); quickResolve('${item.event_id}', 'false_alarm')" title="False alarm">❌</button>
+                            <button class="feedback-action-btn fb-name" onclick="event.stopPropagation(); openFeedbackNameModal('${item.event_id}')" title="Name this person">👤</button>
+                        </span>`;
                     break;
                 default:
                     verdictBadge = item.verdict;
@@ -116,11 +132,22 @@ async function loadFeedbackHistory() {
             const eventLabel = item.event_type === 'vehicle_idle' ? '🚗' :
                 item.event_type === 'person_identified' ? '👤' : '🚨';
 
+            // All items are clickable — open event detail modal with snapshot + edit
+            const clickHandler = `onclick="_openEventDetail({
+                eventId: '${item.event_id.replace(/'/g, "\\'")}',
+                eventTitle: '${(item.event_type || 'Event').replace(/_/g, ' ')}',
+                eventMeta: '${date} ${time}${item.zone ? ' · ' + item.zone : ''}',
+                identityName: '${(item.identity_label || '').replace(/'/g, "\\'")}',
+                zone: '${(item.zone || '').replace(/'/g, "\\'")}',
+                action: '${(item.action || '').replace(/'/g, "\\'")}'
+            })"`;
+
             return `
-                <div class="feedback-item">
+                <div class="feedback-item" ${clickHandler} style="cursor:pointer" title="Click to view snapshot & edit">
                     <span class="feedback-event-type">${eventLabel}</span>
                     <span class="feedback-verdict ${verdictClass}">${verdictBadge}</span>
                     ${zone}
+                    ${actions}
                     <span class="feedback-time">${date} ${time}</span>
                 </div>
             `;
@@ -243,3 +270,90 @@ function initFeedbackPanel() {
         loadFeedbackStats();
     }, 30000);
 }
+
+
+// ---------------------------------------------------------------------------
+// Feedback Naming Modal — name unnamed identifications or pending events
+// ---------------------------------------------------------------------------
+function openFeedbackNameModal(eventId) {
+    _feedbackNamingEventId = eventId;
+    const modal = document.getElementById('feedbackNameModal');
+    const input = document.getElementById('feedbackNameInput');
+    const preview = document.getElementById('feedbackSnapshotPreview');
+    if (modal) {
+        modal.style.display = 'flex';
+        input.value = '';
+        // Load event snapshot
+        if (preview) {
+            preview.style.display = 'none';
+            preview.src = '';
+            const snapshotUrl = `/api/events/${encodeURIComponent(eventId)}/snapshot`;
+            const img = new Image();
+            img.onload = () => {
+                preview.src = snapshotUrl;
+                preview.style.display = 'block';
+            };
+            img.onerror = () => { preview.style.display = 'none'; };
+            img.src = snapshotUrl;
+        }
+        setTimeout(() => input.focus(), 100);
+    }
+}
+
+function closeFeedbackNameModal() {
+    _feedbackNamingEventId = null;
+    const modal = document.getElementById('feedbackNameModal');
+    const preview = document.getElementById('feedbackSnapshotPreview');
+    if (modal) modal.style.display = 'none';
+    if (preview) { preview.src = ''; preview.style.display = 'none'; }
+}
+
+async function submitFeedbackName() {
+    const name = (document.getElementById('feedbackNameInput')?.value || '').trim();
+    if (!name || !_feedbackNamingEventId) return;
+
+    try {
+        const resp = await fetch(`/api/feedback/${_feedbackNamingEventId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ verdict: 'identified', identity_label: name }),
+        });
+        if (resp.ok) {
+            closeFeedbackNameModal();
+            loadFeedbackHistory();
+            loadFeedbackStats();
+        } else {
+            console.warn('Failed to submit name:', await resp.text());
+        }
+    } catch (e) {
+        console.warn('Submit feedback name error:', e);
+    }
+}
+
+/**
+ * Quick-resolve a pending event directly from the dashboard (✅/❌ buttons).
+ */
+async function quickResolve(eventId, verdict) {
+    try {
+        const resp = await fetch(`/api/feedback/${eventId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ verdict }),
+        });
+        if (resp.ok) {
+            loadFeedbackHistory();
+            loadFeedbackStats();
+        }
+    } catch (e) {
+        console.warn('Quick resolve error:', e);
+    }
+}
+
+// Close naming modal on Enter key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && _feedbackNamingEventId) {
+        submitFeedbackName();
+    } else if (e.key === 'Escape' && _feedbackNamingEventId) {
+        closeFeedbackNameModal();
+    }
+});

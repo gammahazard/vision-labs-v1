@@ -138,7 +138,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `identity_state:{camera_id}` | Hash | face-recognizer | tracker, dashboard | `{identities: JSON[{name, bbox, confidence}]}` |
 | `detections:vehicle:{camera_id}` | Stream | vehicle-detector | tracker | `{detections: JSON[{bbox, confidence, class_name, class_id}], detector_type: "vehicle", inference_ms, frame_bytes}` |
 | `vehicle_snapshot:{camera_id}:{ts}` | String (TTL 24h) | tracker | dashboard | Raw JPEG bytes |
-| `frame_hd:{camera_id}` | String (TTL 2s) | camera-ingester (HD thread) | dashboard (HD toggle) | Raw JPEG bytes of main stream frame |
+| `frame_hd:{camera_id}` | String (TTL 5s) | camera-ingester (HD thread) | dashboard (HD toggle) | Raw JPEG bytes of main stream frame |
 
 **Default camera_id:** `front_door`
 
@@ -255,7 +255,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### camera-ingester (`services/camera-ingester/ingester.py`)
 
-**~364 lines.** Single file, no dependencies beyond OpenCV + Redis.
+**~297 lines.** Single file, no dependencies beyond OpenCV + Redis.
 
 - **RTSP connection:** Uses sub-stream (640×480) for AI inference; optional HD thread reads main stream and caches latest frame in Redis for a live HD toggle
 - **Frame throttling:** `cap.grab()` discards frames between captures to hit TARGET_FPS
@@ -266,7 +266,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### pose-detector (`services/pose-detector/detector.py`)
 
-**~346 lines.** GPU service.
+**~282 lines.** GPU service.
 
 - **Model:** YOLOv8s-pose (auto-downloaded on first run, cached in Docker volume `yolo-models`)
 - **Consumer group:** `pose_detectors` — can run multiple instances for load balancing
@@ -277,7 +277,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### vehicle-detector (`services/vehicle-detector/detector.py`)
 
-**~309 lines.** GPU service. Mirrors pose-detector architecture.
+**~256 lines.** GPU service. Mirrors pose-detector architecture.
 
 - **Model:** YOLOv8s (general object detection, auto-downloaded, cached in Docker volume `yolo-models`)
 - **Consumer group:** `vehicle_detectors` — reads from same frame stream as pose-detector
@@ -289,7 +289,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### tracker (`services/tracker/tracker.py`)
 
-**~878 lines.** CPU-only, most complex service.
+**~747 lines.** CPU-only, most complex service.
 
 **Core algorithm:**
 - Maintains a dict of `TrackedPerson` objects, each with: person_id, bbox, first_seen, last_seen, action, action_history, confirmed (bool)
@@ -320,7 +320,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### face-recognizer (`services/face-recognizer/recognizer.py` + `face_db.py`)
 
-**~732 + ~463 lines.** GPU service + SQLite DB + REST API.
+**~603 + ~383 lines.** GPU service + SQLite DB + REST API.
 
 **Dual role:**
 1. **Background loop** — reads detections, crops faces, matches embeddings, publishes identities
@@ -331,7 +331,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - Crops upper 50% of person bbox for face detection
 - Generates 512-dimensional normalized embedding
 - Cosine similarity matching against all enrolled faces
-- Match threshold: 0.45 default (configurable via `MATCH_THRESHOLD` env var)
+- Match threshold: 0.5 default (constructor parameter on `FaceDB`)
 
 **face_db.py (FaceDB class):**
 - SQLite with WAL mode, in-memory embedding cache for fast matching
@@ -355,7 +355,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### Backend (`services/dashboard/server.py`)
 
-**~918 lines.** FastAPI with modular routes.
+**~903 lines.** FastAPI with modular routes.
 
 **Startup sequence:**
 1. Initialize auth SQLite database (create default admin/admin if empty)
@@ -402,16 +402,19 @@ All files in `services/dashboard/static/`. No build step — plain HTML/JS/CSS.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `index.html` | ~540 | Main dashboard: video feed, sidebar panels (events, faces, unknowns, zones, conditions, settings, notifications, auth). Enrollment wizard modal. Label modal. |
-| `login.html` | ~280 | Login page with animated pulsing eye icon, dark theme, fade-in form |
-| `style.css` | ~1718 | Full dark theme, glassmorphism panels, responsive layout, zone editor styles, wizard overlay styles, event photo lightbox modal |
-| `app.js` | 308 | Core: WebSocket connect (auto-reconnect 2s), FPS counter, settings sliders (debounced 300ms POST), notification status, `init()` orchestrator |
-| `auth.js` | 104 | Logout, change password/username, auth status display |
-| `events.js` | 200 | Polls `/api/events` every 2s, deduplicates by event ID, renders event cards with icons + clickable photo thumbnails (face photos for known users, camera snapshots for unknowns), lightbox modal for full-size viewing |
-| `faces.js` | 362 | Multi-angle enrollment wizard (5 angles: front/left/right/up/down), face gallery grouped by name, delete all angles for a person |
-| `unknowns.js` | 193 | Unknown faces gallery, label modal (dropdown of known names OR free text), bulk clear |
-| `conditions.js` | 168 | Fetches `/api/conditions` every 5min, renders time periods, sunrise/sunset, weather emoji mapping |
-| `zones.js` | 525 | Canvas overlay zone drawing (click-to-place polygon, double-click to close), drag-to-edit vertices, letterbox-aware coordinate normalization, zone list with color-coded alert levels |
+| `index.html` | ~510 | Main dashboard: video feed, sidebar panels (events, faces, unknowns, zones, conditions, settings, notifications, auth). Enrollment wizard modal. Label modal. |
+| `login.html` | ~351 | Login page with animated pulsing eye icon, dark theme, fade-in form |
+| `style.css` | ~1940 | Full dark theme, glassmorphism panels, responsive layout, zone editor styles, wizard overlay styles, event photo lightbox modal |
+| `app.js` | ~292 | Core: WebSocket connect (auto-reconnect 2s), FPS counter, settings sliders (debounced 300ms POST), notification status, `init()` orchestrator |
+| `ai.js` | ~422 | AI chat client: onboarding wizard, message rendering (markdown + inline images), tool-call status display |
+| `auth.js` | ~92 | Logout, change password/username, auth status display |
+| `events.js` | ~314 | Polls `/api/events` every 2s, deduplicates by event ID, renders event cards with icons + clickable photo thumbnails (face photos for known users, camera snapshots for unknowns), lightbox modal for full-size viewing |
+| `faces.js` | ~330 | Multi-angle enrollment wizard (5 angles: front/left/right/up/down), face gallery grouped by name, delete all angles for a person |
+| `unknowns.js` | ~167 | Unknown faces gallery, label modal (dropdown of known names OR free text), bulk clear |
+| `conditions.js` | ~146 | Fetches `/api/conditions` every 5min, renders time periods, sunrise/sunset, weather emoji mapping |
+| `zones.js` | ~455 | Canvas overlay zone drawing (click-to-place polygon, double-click to close), drag-to-edit vertices, letterbox-aware coordinate normalization, zone list with color-coded alert levels |
+| `feedback.js` | ~318 | Feedback review queue: verdict history, suppression rules, stats panel, quick-resolve actions |
+| `browse.js` | ~149 | Vehicle snapshot browser: day picker, thumbnail grid, face gallery tab |
 
 **Initialization (`app.js init()`):**
 1. Connect WebSocket
@@ -604,7 +607,7 @@ An alert suppression engine that learns from user feedback over time, reducing f
 - Feedback storage is a **separate SQLite DB** (not mixed with face DB or auth DB)
 - Review queue is a **new routes module** (`routes/feedback.py`) — follows existing pattern
 - Telegram inline buttons use Telegram's callback_query API — existing `notifications.py` extended
-- All existing services remain **unchanged** — suppression happens in the tracker before `XADD` events
+- All existing services remain **unchanged** — suppression happens in `notifications.py` before sending Telegram alerts
 
 ### How it stays secure
 
@@ -709,23 +712,23 @@ vision-labsv1/
 ├── services/
 │   ├── camera-ingester/
 │   │   ├── Dockerfile
-│   │   ├── ingester.py           # RTSP → Redis (~364 lines)
+│   │   ├── ingester.py           # RTSP → Redis (~297 lines)
 │   │   └── requirements.txt
 │   │
 │   ├── pose-detector/
 │   │   ├── Dockerfile
-│   │   ├── detector.py           # YOLOv8s-pose inference (~346 lines)
+│   │   ├── detector.py           # YOLOv8s-pose inference (~282 lines)
 │   │   └── requirements.txt
 │   │
 │   ├── tracker/
 │   │   ├── Dockerfile
-│   │   ├── tracker.py            # IoU tracking + events (~878 lines)
+│   │   ├── tracker.py            # IoU tracking + events (~747 lines)
 │   │   └── requirements.txt
 │   │
 │   ├── face-recognizer/
 │   │   ├── Dockerfile
-│   │   ├── recognizer.py         # InsightFace + REST API (~732 lines)
-│   │   ├── face_db.py            # SQLite face database (~463 lines)
+│   │   ├── recognizer.py         # InsightFace + REST API (~603 lines)
+│   │   ├── face_db.py            # SQLite face database (~383 lines)
 │   │   └── requirements.txt
 │   │
 │   ├── vehicle-detector/
@@ -735,9 +738,9 @@ vision-labsv1/
 │   │
 │   └── dashboard/
 │       ├── Dockerfile
-│       ├── server.py             # FastAPI + WebSocket (~919 lines)
-│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~557 lines)
-│       ├── ai_db.py              # AI config + reminders + chat history (SQLite, ~237 lines)
+│       ├── server.py             # FastAPI + WebSocket (~903 lines)
+│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~513 lines)
+│       ├── ai_db.py              # AI config + reminders + chat history (SQLite, ~209 lines)
 │       ├── requirements.txt
 │       ├── routes/
 │       │   ├── __init__.py       # Shared state container
@@ -751,7 +754,7 @@ vision-labsv1/
 │       │   ├── notifications.py  # Telegram integration
 │       │   ├── feedback.py       # Feedback + suppression rules API
 │       │   ├── browse.py          # Vehicle snapshot browser + faces gallery
-│       │   └── ai.py             # AI assistant (Ollama chat + 18 tools, ~1420 lines)
+│       │   └── ai.py             # AI assistant (Ollama chat + 18 tools, ~1244 lines)
 │       └── static/
 │           ├── index.html        # Main dashboard layout
 │           ├── ai.html           # AI assistant (onboarding + chat)

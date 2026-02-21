@@ -79,6 +79,38 @@ def _bbox_iou(box_a: list, box_b: list) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _in_dead_zone(bbox: list, frame_w: int, frame_h: int, zone_cache: dict) -> bool:
+    """
+    Check if a bbox center falls inside any dead_zone.
+    Uses ray-casting point-in-polygon (same algorithm as contracts/zones.py).
+    """
+    if not zone_cache or len(bbox) != 4:
+        return False
+
+    cx = ((bbox[0] + bbox[2]) / 2) / frame_w
+    cy = ((bbox[1] + bbox[3]) / 2) / frame_h
+
+    for zone in zone_cache.values():
+        if zone.get("alert_level") != "dead_zone":
+            continue
+        pts = zone.get("points", [])
+        if len(pts) < 3:
+            continue
+        # Ray-casting algorithm
+        inside = False
+        n = len(pts)
+        j = n - 1
+        for i in range(n):
+            xi, yi = pts[i]
+            xj, yj = pts[j]
+            if ((yi > cy) != (yj > cy)) and (cx < (xj - xi) * (cy - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+        if inside:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -397,16 +429,65 @@ async def _event_notification_poller():
 
     loop = asyncio.get_event_loop()
 
-    def _save_snapshot(event_id: str):
-        """Grab the latest camera frame and save it as a JPEG for this event."""
+    def _save_snapshot(event_id: str, bbox_json: str = ""):
+        """Grab the latest camera frame and save it as a JPEG for this event.
+        Prefers the HD frame for clearer snapshots. Falls back to sub-stream.
+        If bbox_json is provided (JSON list [x1,y1,x2,y2] in sub-stream pixel
+        coords), scales it to the snapshot resolution and draws a bright
+        highlight rectangle so the user can see which detection this refers to.
+        """
         try:
-            frame = get_latest_frame()
-            if frame:
-                # Redis event IDs contain ":" — replace for safe filenames
-                safe_id = event_id.replace(":", "-")
-                path = os.path.join(SNAPSHOT_DIR, f"{safe_id}.jpg")
-                with open(path, "wb") as f:
-                    f.write(frame)
+            # --- Try HD frame first (clearer image) ---
+            r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT,
+                                decode_responses=False)
+            hd_bytes = r_bin.get(HD_FRAME_KEY.encode())
+            sd_frame = get_latest_frame()
+
+            # Pick best available frame
+            frame = hd_bytes if hd_bytes else sd_frame
+            is_hd = bool(hd_bytes)
+
+            if not frame:
+                return
+
+            # Draw bbox highlight if provided
+            if bbox_json:
+                try:
+                    bbox = json.loads(bbox_json) if isinstance(bbox_json, str) else bbox_json
+                    if len(bbox) == 4:
+                        np_arr = np.frombuffer(frame, np.uint8)
+                        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            x1, y1, x2, y2 = [float(v) for v in bbox]
+
+                            # Scale bbox from sub-stream coords to snapshot
+                            # resolution if we're using the HD frame
+                            if is_hd and sd_frame:
+                                sd_arr = np.frombuffer(sd_frame, np.uint8)
+                                sd_img = cv2.imdecode(sd_arr, cv2.IMREAD_COLOR)
+                                if sd_img is not None:
+                                    sd_h, sd_w = sd_img.shape[:2]
+                                    hd_h, hd_w = img.shape[:2]
+                                    sx = hd_w / sd_w
+                                    sy = hd_h / sd_h
+                                    x1, y1, x2, y2 = x1*sx, y1*sy, x2*sx, y2*sy
+
+                            ix1, iy1, ix2, iy2 = int(x1), int(y1), int(x2), int(y2)
+                            # Draw thick bright cyan rectangle
+                            cv2.rectangle(img, (ix1, iy1), (ix2, iy2), (255, 200, 0), 3)
+                            # Add small label
+                            cv2.putText(img, "DETECTION", (ix1, iy1 - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+                            _, frame = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                            frame = frame.tobytes()
+                except Exception:
+                    pass  # Fall back to raw frame
+
+            # Redis event IDs contain ":" — replace for safe filenames
+            safe_id = event_id.replace(":", "-")
+            path = os.path.join(SNAPSHOT_DIR, f"{safe_id}.jpg")
+            with open(path, "wb") as f:
+                f.write(frame)
         except Exception as e:
             logger.debug(f"Snapshot save failed for {event_id}: {e}")
 
@@ -424,7 +505,8 @@ async def _event_notification_poller():
     def _save_vehicle_snapshot(snapshot_key: str, event_data: dict):
         """
         Pull vehicle snapshot JPEG from Redis and save to disk.
-        Organized as: vehicles/YYYY-MM-DD/HH-MM-SS_class.jpg
+        Draws bbox highlight if available. Organized as:
+        vehicles/YYYY-MM-DD/HH-MM-SS_class.jpg
         """
         try:
             # Use a separate raw-bytes Redis client (decode_responses=False)
@@ -433,13 +515,33 @@ async def _event_notification_poller():
             if not jpeg_data:
                 return
 
+            # Draw bbox highlight if present in event data
+            bbox_json = event_data.get("bbox", "")
+            vehicle_class = event_data.get("vehicle_class", "vehicle")
+            if bbox_json:
+                try:
+                    bbox = json.loads(bbox_json) if isinstance(bbox_json, str) else bbox_json
+                    if len(bbox) == 4:
+                        np_arr = np.frombuffer(jpeg_data, np.uint8)
+                        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            x1, y1, x2, y2 = [int(v) for v in bbox]
+                            # Orange to match live overlay vehicle color
+                            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 3)
+                            label = vehicle_class.upper()
+                            cv2.putText(img, label, (x1, y1 - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+                            _, jpeg_data = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                            jpeg_data = jpeg_data.tobytes()
+                except Exception:
+                    pass  # Fall back to raw frame
+
             # Parse timestamp from event data
             ts = float(event_data.get("timestamp", time.time()))
             _tz = ZoneInfo(os.getenv("LOCATION_TIMEZONE", "America/Toronto"))
             dt = datetime.fromtimestamp(ts, tz=_tz)
             day_str = dt.strftime("%Y-%m-%d")
             time_str = dt.strftime("%H-%M-%S")
-            vehicle_class = event_data.get("vehicle_class", "vehicle")
 
             # Create day folder and write file
             day_dir = os.path.join(VEHICLE_SNAPSHOT_DIR, day_str)
@@ -473,8 +575,11 @@ async def _event_notification_poller():
                         event_type = data.get("event_type", "")
 
                         if event_type == "person_appeared":
-                            # Always save snapshot (for event feed thumbnails)
-                            await loop.run_in_executor(None, _save_snapshot, msg_id)
+                            # Always save snapshot with highlighted bbox
+                            bbox_json = data.get("bbox", "")
+                            await loop.run_in_executor(
+                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                            )
                             # Send Telegram if person notifications enabled
                             if is_configured() and notify_person:
                                 await notify_person_detected(
@@ -482,6 +587,11 @@ async def _event_notification_poller():
                                 )
 
                         elif event_type == "person_identified":
+                            # Save snapshot with highlighted bbox for feedback modal
+                            bbox_json = data.get("bbox", "")
+                            await loop.run_in_executor(
+                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                            )
                             # Skip if suppress_known is on (known people don't alert)
                             if is_configured() and notify_person and not suppress_known:
                                 await notify_person_identified(
@@ -489,7 +599,12 @@ async def _event_notification_poller():
                                 )
 
                         elif event_type == "vehicle_detected":
-                            # Save vehicle snapshot to disk in day folder
+                            # Save event snapshot with highlighted bbox for event detail modal
+                            bbox_json = data.get("bbox", "")
+                            await loop.run_in_executor(
+                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                            )
+                            # Also save vehicle snapshot to disk in day folder
                             snapshot_key = data.get("snapshot_key", "")
                             if snapshot_key:
                                 await loop.run_in_executor(
@@ -497,7 +612,12 @@ async def _event_notification_poller():
                                 )
 
                         elif event_type == "vehicle_idle":
-                            # Save snapshot to disk + optionally notify
+                            # Save snapshot with highlighted bbox for feedback modal
+                            bbox_json = data.get("bbox", "")
+                            await loop.run_in_executor(
+                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                            )
+                            # Save vehicle snapshot to disk too
                             snapshot_key = data.get("snapshot_key", "")
                             if snapshot_key:
                                 await loop.run_in_executor(
@@ -674,12 +794,31 @@ async def websocket_live(ws: WebSocket):
                     if pid not in active_pids:
                         del websocket_live._sticky_identities[pid]
 
+                # Load zone cache for dead zone filtering
+                if not hasattr(websocket_live, '_zone_cache'):
+                    websocket_live._zone_cache = {}
+                    websocket_live._zone_cache_time = 0
+
+                now_ts = time.time()
+                if now_ts - websocket_live._zone_cache_time > 5:
+                    raw = r.hgetall(ZONE_KEY)
+                    websocket_live._zone_cache = {
+                        k: json.loads(v) for k, v in raw.items()
+                    } if raw else {}
+                    websocket_live._zone_cache_time = now_ts
+
+                h, w = frame.shape[:2]
+
                 # Draw bounding boxes and labels on the frame
                 for det in detections:
                     bbox = det.get("bbox", [])
                     conf = det.get("confidence", 0)
                     if len(bbox) == 4:
                         x1, y1, x2, y2 = [int(v) for v in bbox]
+
+                        # Skip drawing if bbox center is inside a dead zone
+                        if _in_dead_zone([x1, y1, x2, y2], w, h, websocket_live._zone_cache):
+                            continue
 
                         # Match detection bbox to a tracker person for ID + action
                         person_name = None
@@ -768,6 +907,11 @@ async def websocket_live(ws: WebSocket):
                             vclass = vdet.get("class_name", "vehicle")
                             if len(vbbox) == 4:
                                 vx1, vy1, vx2, vy2 = [int(v) for v in vbbox]
+
+                                # Skip drawing if bbox center is in a dead zone
+                                if _in_dead_zone([vx1, vy1, vx2, vy2], w, h, websocket_live._zone_cache):
+                                    continue
+
                                 vcolor = (0, 140, 255)  # Orange (BGR)
                                 vlabel = f"{vclass} {vconf:.0%}"
                                 cv2.rectangle(frame, (vx1, vy1), (vx2, vy2), vcolor, 2)
@@ -795,20 +939,6 @@ async def websocket_live(ws: WebSocket):
 
                 # Draw zone overlays on the frame
                 try:
-                    if not hasattr(websocket_live, '_zone_cache'):
-                        websocket_live._zone_cache = {}
-                        websocket_live._zone_cache_time = 0
-
-                    # Refresh zone cache every 5 seconds
-                    now_ts = time.time()
-                    if now_ts - websocket_live._zone_cache_time > 5:
-                        raw = r.hgetall(ZONE_KEY)
-                        websocket_live._zone_cache = {
-                            k: json.loads(v) for k, v in raw.items()
-                        } if raw else {}
-                        websocket_live._zone_cache_time = now_ts
-
-                    h, w = frame.shape[:2]
                     for zone_id, zone in websocket_live._zone_cache.items():
                         pts_norm = zone.get("points", [])
                         if len(pts_norm) < 3:

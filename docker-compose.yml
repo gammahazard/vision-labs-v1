@@ -65,6 +65,7 @@ services:
       - REDIS_PORT=6379
       - TARGET_FPS=15
       - JPEG_QUALITY=80
+      - HD_TARGET_FPS=1
       - MAX_STREAM_LEN=1000
     depends_on:
       redis:

@@ -76,10 +76,27 @@ async def submit_verdict(event_id: str, body: VerdictRequest):
     if body.verdict not in ("real_threat", "false_alarm", "identified"):
         return JSONResponse(status_code=400, content={"error": "Invalid verdict"})
 
+    # Get existing record before resolving (to find telegram_message_id)
+    existing = _feedback_db.get_feedback(event_id)
+
     ok = _feedback_db.resolve_pending(
         event_id, body.verdict, identity_label=body.identity_label or ""
     )
     if ok:
+        # Update Telegram inline button if this event came from Telegram
+        if existing and existing.get("telegram_message_id"):
+            try:
+                from routes.notifications import edit_message_buttons
+                msg_id = existing["telegram_message_id"]
+                if body.verdict == "identified" and body.identity_label:
+                    await edit_message_buttons(msg_id, f"👤 {body.identity_label} — Named")
+                elif body.verdict == "real_threat":
+                    await edit_message_buttons(msg_id, "✅ Real Threat — Dashboard")
+                elif body.verdict == "false_alarm":
+                    await edit_message_buttons(msg_id, "❌ False Alarm — Dashboard")
+            except Exception as e:
+                logger.debug(f"Could not update Telegram button: {e}")
+
         return {"status": "ok", "event_id": event_id, "verdict": body.verdict}
     else:
         return JSONResponse(

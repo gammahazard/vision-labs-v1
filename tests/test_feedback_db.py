@@ -322,10 +322,14 @@ class TestPendingEvents:
         assert record["verdict"] == "identified"
         assert record["identity_label"] == "Neighbor Dave"
 
-    def test_resolve_nonexistent_returns_false(self, db):
-        """Resolving a non-existent event should return False."""
+    def test_resolve_nonexistent_creates_record(self, db):
+        """Resolving a non-existent event should upsert a new feedback record."""
         ok = db.resolve_pending("nonexistent", "real_threat")
-        assert ok is False
+        assert ok is True
+        # Verify the record was created
+        record = db.get_feedback("nonexistent")
+        assert record is not None
+        assert record["verdict"] == "real_threat"
 
     def test_lookup_by_telegram_message_id(self, db):
         """Can look up pending events by Telegram message ID."""
