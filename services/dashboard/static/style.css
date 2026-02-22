@@ -1289,7 +1289,7 @@ input[type="range"]::-moz-range-thumb {
     content: "Suppression disabled — all detections alert during night hours";
     position: absolute;
     bottom: calc(100% + 8px);
-    right: -8px;
+    right: 0;
     background: var(--bg-panel);
     color: var(--text-primary);
     border: 1px solid rgba(96, 165, 250, 0.4);
@@ -1297,7 +1297,10 @@ input[type="range"]::-moz-range-thumb {
     border-radius: var(--radius-sm);
     font-size: 0.7rem;
     font-weight: 500;
-    white-space: nowrap;
+    width: max-content;
+    max-width: 220px;
+    white-space: normal;
+    line-height: 1.4;
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.2s ease;
