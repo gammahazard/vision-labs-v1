@@ -20,13 +20,17 @@ import re
 import json
 import asyncio
 import logging
+import glob
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import cv2
+import numpy as np
 import redis
 import httpx
 
 import routes as ctx
+from contracts.time_rules import get_time_period
 from routes.notifications import (
     is_configured, _is_authorized,
     send_text, send_photo, send_video,
@@ -289,6 +293,7 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
         "/clip": _cmd_clip,
         "/events": _cmd_events,
         "/ask": _cmd_ask,
+        "/timelapse": _cmd_timelapse,
     }
     # Admin-only commands
     admin_handlers = {
@@ -300,6 +305,10 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
         "/snapshot": _cmd_snapshot,
         "/status": _cmd_status,
         "/who": _cmd_who,
+        "/zones": _cmd_zones,
+        "/rules": _cmd_rules,
+        "/night": _cmd_night,
+        "/faces": _cmd_faces,
         "/start": _cmd_help,
         "/help": _cmd_help,
     }
@@ -479,7 +488,12 @@ async def _cmd_help(chat_id: str = ""):
         "/clip [5-40] — 🎬 Video clip (default 5s)\n"
         "/status — 📊 System health\n"
         "/who — 👁️ Who's in frame now\n"
-        "/events [1-20] — 📋 Recent detections (default 5)\n"
+        "/events [1-20] — 📋 Recent detections\n"
+        "/zones — 🗺️ Camera view with zones drawn\n"
+        "/rules — 📜 Active suppression rules\n"
+        "/night — 🌙 Night mode status\n"
+        "/faces — 👤 Enrolled faces\n"
+        "/timelapse [date] — ⏩ Timelapse from snapshots\n"
         "/ask [question] — 🧠 Ask the AI assistant\n\n"
         "🔒 <b>Admin Only</b>\n"
         "/arm — 🟢 Enable notifications\n"
@@ -566,6 +580,339 @@ async def _cmd_events(chat_id: str = "", text: str = ""):
 
     except Exception as e:
         await send_text(f"⚠️ Failed to fetch events: {e}", chat_id=chat_id)
+
+
+# ---------------------------------------------------------------------------
+# /zones — Camera snapshot with zone overlays
+# ---------------------------------------------------------------------------
+async def _cmd_zones(chat_id: str = ""):
+    """Send a camera snapshot with all security zones drawn on it."""
+    try:
+        # Get live frame
+        frame_bytes = get_latest_frame()
+        if not frame_bytes:
+            await send_text("⚠️ No camera frame available", chat_id=chat_id)
+            return
+
+        # Load zones from Redis
+        zone_data = ctx.r.hgetall(ctx.ZONE_KEY) if ctx.ZONE_KEY else {}
+        if not zone_data:
+            # No zones — just send the snapshot with a note
+            await send_photo(frame_bytes, "🗺️ No zones defined yet — use the dashboard to create zones.", chat_id=chat_id)
+            return
+
+        # Decode frame
+        nparr = np.frombuffer(frame_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None:
+            await send_text("⚠️ Failed to decode camera frame", chat_id=chat_id)
+            return
+
+        h, w = frame.shape[:2]
+        zone_count = 0
+
+        # Draw each zone (same logic as server.py WebSocket overlay)
+        for zone_id, zone_json in zone_data.items():
+            try:
+                zone = json.loads(zone_json)
+                pts_norm = zone.get("points", [])
+                if len(pts_norm) < 3:
+                    continue
+
+                pts = np.array(
+                    [[int(p[0] * w), int(p[1] * h)] for p in pts_norm],
+                    dtype=np.int32,
+                )
+
+                # Zone color by alert level (BGR)
+                alert_level = zone.get("alert_level", "log_only")
+                zone_colors = {
+                    "always": (0, 0, 220),        # Red
+                    "night_only": (0, 140, 255),   # Orange
+                    "log_only": (200, 160, 60),    # Blue
+                    "ignore": (100, 100, 100),     # Gray
+                    "dead_zone": (40, 40, 40),     # Dark gray
+                }
+                color = zone_colors.get(alert_level, (200, 160, 60))
+
+                # Semi-transparent fill
+                overlay = frame.copy()
+                cv2.fillPoly(overlay, [pts], color)
+                cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
+
+                # Zone border
+                cv2.polylines(frame, [pts], True, color, 2)
+
+                # Zone name label
+                name = zone.get("name", zone_id)
+                level_tag = alert_level.replace("_", " ").title()
+                label = f"{name} [{level_tag}]"
+                cx = int(np.mean(pts[:, 0]))
+                cy = int(np.mean(pts[:, 1]))
+                label_size = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                )[0]
+                cv2.rectangle(
+                    frame,
+                    (cx - label_size[0] // 2 - 4, cy - label_size[1] // 2 - 4),
+                    (cx + label_size[0] // 2 + 4, cy + label_size[1] // 2 + 4),
+                    color, -1,
+                )
+                cv2.putText(
+                    frame, label,
+                    (cx - label_size[0] // 2, cy + label_size[1] // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                )
+                zone_count += 1
+            except Exception:
+                continue
+
+        # Encode back to JPEG
+        _, jpeg_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        annotated_bytes = jpeg_buf.tobytes()
+
+        await send_photo(
+            annotated_bytes,
+            f"🗺️ <b>Security Zones</b> — {zone_count} zone(s) drawn\n"
+            f"🕐 {_now_str()}",
+            chat_id=chat_id,
+        )
+    except Exception as e:
+        await send_text(f"⚠️ Failed to render zones: {e}", chat_id=chat_id)
+
+
+# ---------------------------------------------------------------------------
+# /rules — Active suppression rules
+# ---------------------------------------------------------------------------
+async def _cmd_rules(chat_id: str = ""):
+    """List active suppression rules and feedback stats."""
+    try:
+        from server import feedback_db as _fdb
+        if not _fdb:
+            await send_text("⚠️ Feedback system not initialized", chat_id=chat_id)
+            return
+
+        rules = _fdb.get_suppression_rules()
+        stats = _fdb.get_stats()
+
+        parts = ["📜 <b>Suppression Rules</b>\n"]
+
+        # Stats summary
+        parts.append(
+            f"• Total feedback: {stats['total_feedback']}\n"
+            f"• Alert accuracy: {stats['alert_accuracy']:.0%}\n"
+            f"• Active rules: {stats['active_suppression_rules']}\n"
+        )
+
+        if not rules:
+            parts.append("No suppression rules created yet.")
+        else:
+            for r in rules:
+                status = "🟢 Active" if r.get("active", 1) else "⏸️ Paused"
+                rtype = r.get("rule_type", "unknown")
+                if rtype == "identity":
+                    target = r.get("identity", "?")
+                    parts.append(f"  👤 <b>{target}</b> — {status}")
+                elif rtype == "zone_time":
+                    zone = r.get("zone", "?")
+                    period = r.get("time_period", "?")
+                    parts.append(f"  📍 <b>{zone}</b> @ {period} — {status}")
+                else:
+                    parts.append(f"  ❓ {rtype} — {status}")
+                fa = r.get("min_false_alarms", "?")
+                parts.append(f"     ({fa} false alarms)")
+
+        await send_text("\n".join(parts), chat_id=chat_id)
+    except Exception as e:
+        await send_text(f"⚠️ Failed to fetch rules: {e}", chat_id=chat_id)
+
+
+# ---------------------------------------------------------------------------
+# /night — Night mode status
+# ---------------------------------------------------------------------------
+async def _cmd_night(chat_id: str = ""):
+    """Show current time period and whether night override is active."""
+    try:
+        now = datetime.now(TZ_LOCAL)
+        period = get_time_period(now)
+        is_night = period in ("night", "late_night")
+
+        period_icons = {
+            "daytime": "☀️",
+            "twilight": "🌅",
+            "night": "🌙",
+            "late_night": "🌑",
+        }
+        icon = period_icons.get(period, "🕐")
+        label = period.replace("_", " ").title()
+
+        if is_night:
+            msg = (
+                f"{icon} <b>{label}</b>\n\n"
+                f"👁️ <b>Night Override ACTIVE</b>\n"
+                f"All suppression rules are bypassed.\n"
+                f"Every person detection will trigger a notification.\n"
+                f"Dead zones still enforced.\n\n"
+                f"🕐 {now.strftime('%I:%M %p')}"
+            )
+        else:
+            msg = (
+                f"{icon} <b>{label}</b>\n\n"
+                f"🔇 Night Override: OFF\n"
+                f"Suppression rules are active as normal.\n\n"
+                f"🕐 {now.strftime('%I:%M %p')}"
+            )
+
+        await send_text(msg, chat_id=chat_id)
+    except Exception as e:
+        await send_text(f"⚠️ Failed to check night status: {e}", chat_id=chat_id)
+
+
+# ---------------------------------------------------------------------------
+# /faces — Enrolled faces list
+# ---------------------------------------------------------------------------
+async def _cmd_faces(chat_id: str = ""):
+    """List enrolled/known faces."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{ctx.FACE_API_URL}/api/faces/list")
+            if resp.status_code != 200:
+                await send_text("⚠️ Face recognizer service unavailable", chat_id=chat_id)
+                return
+            data = resp.json()
+
+        faces = data.get("faces", [])
+        if not faces:
+            await send_text("👤 No faces enrolled yet — use the dashboard to add people.", chat_id=chat_id)
+            return
+
+        parts = [f"👤 <b>Enrolled Faces</b> ({len(faces)})\n"]
+        for f in faces:
+            name = f.get("name", "unnamed")
+            photos = f.get("photo_count", f.get("num_photos", "?"))
+            parts.append(f"  • {name} ({photos} photo(s))")
+
+        await send_text("\n".join(parts), chat_id=chat_id)
+    except Exception as e:
+        await send_text(f"⚠️ Failed to fetch faces: {e}", chat_id=chat_id)
+
+
+# ---------------------------------------------------------------------------
+# /timelapse — Stitch event snapshots into MP4
+# ---------------------------------------------------------------------------
+async def _cmd_timelapse(chat_id: str = "", text: str = ""):
+    """Stitch today's (or a given date's) event snapshots into a timelapse MP4."""
+    # Parse optional date: /timelapse 2026-02-21
+    parts_args = text.split()
+    if len(parts_args) >= 2:
+        date_str = parts_args[1]
+    else:
+        date_str = datetime.now(TZ_LOCAL).strftime("%Y-%m-%d")
+
+    if not os.path.isdir(SNAPSHOT_DIR):
+        await send_text(
+            f"📂 Snapshot directory not found.\n"
+            f"Usage: /timelapse [YYYY-MM-DD]",
+            chat_id=chat_id,
+        )
+        return
+
+    # Snapshots are saved flat as {redis_id}.jpg where redis_id is like
+    # "1708567891234-0" (millisecond timestamp). Parse and filter by date.
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        await send_text(
+            f"⚠️ Invalid date format: {date_str}\n"
+            f"Usage: /timelapse YYYY-MM-DD",
+            chat_id=chat_id,
+        )
+        return
+
+    all_jpgs = glob.glob(os.path.join(SNAPSHOT_DIR, "*.jpg"))
+    matching = []
+    for path in all_jpgs:
+        fname = os.path.splitext(os.path.basename(path))[0]  # e.g. "1708567891234-0"
+        try:
+            # Redis stream ID: "{ms_timestamp}-{seq}"
+            ms_str = fname.split("-")[0]
+            ts = datetime.fromtimestamp(int(ms_str) / 1000, tz=TZ_LOCAL)
+            if ts.date() == target_date:
+                matching.append((ts, path))
+        except (ValueError, IndexError, OSError):
+            continue
+
+    matching.sort(key=lambda x: x[0])
+    jpg_files = [p for _, p in matching]
+
+    if len(jpg_files) < 3:
+        await send_text(
+            f"📂 Only {len(jpg_files)} snapshot(s) for {date_str} — need at least 3 for a timelapse.",
+            chat_id=chat_id,
+        )
+        return
+
+    await send_text(
+        f"⏩ Building timelapse from {len(jpg_files)} snapshots ({date_str})...",
+        chat_id=chat_id,
+    )
+
+    loop = asyncio.get_running_loop()
+    mp4_bytes = await loop.run_in_executor(None, lambda: _build_timelapse(jpg_files))
+
+    if mp4_bytes:
+        await send_video(
+            mp4_bytes,
+            f"⏩ Timelapse — {date_str} ({len(jpg_files)} frames)",
+            chat_id=chat_id,
+        )
+    else:
+        await send_text("⚠️ Failed to build timelapse — encoding error", chat_id=chat_id)
+
+
+def _build_timelapse(jpg_paths: list[str], fps: int = 3) -> bytes | None:
+    """Stitch JPEG files into an MP4 timelapse. Returns MP4 bytes or None."""
+    import tempfile
+
+    if not jpg_paths:
+        return None
+
+    # Read first frame to get dimensions
+    first = cv2.imread(jpg_paths[0])
+    if first is None:
+        return None
+    h, w = first.shape[:2]
+
+    # Write to a temp file
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
+
+        for path in jpg_paths:
+            img = cv2.imread(path)
+            if img is None:
+                continue
+            # Resize if dimensions don't match first frame
+            if img.shape[:2] != (h, w):
+                img = cv2.resize(img, (w, h))
+            # Hold each frame for a beat (repeat 2x for readability)
+            writer.write(img)
+            writer.write(img)
+        writer.release()
+
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -7,12 +7,12 @@ PURPOSE:
     external APIs, or performs actions and returns a JSON string result
     that the LLM uses to formulate its response.
 
-TOOLS (18):
+TOOLS (19):
     query_events, query_faces, query_feedback_stats, send_telegram,
     schedule_reminder, get_system_status, retrain_rules, review_feedback,
     get_live_scene, query_unknowns, query_events_by_date, query_zones,
     browse_vehicles, get_weather, query_event_patterns, capture_snapshot,
-    capture_clip, query_notification_history
+    capture_clip, query_notification_history, query_activity_heatmap
 """
 
 import os
@@ -322,6 +322,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_activity_heatmap",
+            "description": "Get a day-of-week × hour-of-day activity heatmap. Shows which days and hours are busiest, weekend vs weekday comparison, and peak activity windows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_back": {
+                        "type": "integer",
+                        "description": "How many days of history to analyze (default 14, max 30)",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -367,6 +384,8 @@ async def execute_tool(name: str, args: dict) -> str:
             return _tool_capture_clip()
         elif name == "query_notification_history":
             return _tool_query_notification_history(args)
+        elif name == "query_activity_heatmap":
+            return _tool_query_activity_heatmap(args)
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -1060,3 +1079,82 @@ def _tool_review_feedback(args: dict) -> str:
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+def _tool_query_activity_heatmap(args: dict) -> str:
+    """Day-of-week × hour-of-day activity heatmap."""
+    from collections import defaultdict
+
+    days_back = min(int(args.get("days_back", 14)), 30)
+    now = datetime.now(TZ_LOCAL)
+    start_date = now - timedelta(days=days_back)
+    start_ms = int(start_date.timestamp() * 1000)
+    end_ms = int(now.timestamp() * 1000)
+
+    try:
+        events_raw = ctx.r.xrange(
+            ctx.EVENT_STREAM, min=f"{start_ms}-0", max=f"{end_ms}-0"
+        )
+
+        # Cross-tabulate: day_name -> {hour -> count}
+        DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                     "Friday", "Saturday", "Sunday"]
+        heatmap = {d: defaultdict(int) for d in DAY_NAMES}
+        hourly_total = defaultdict(int)
+        daily_total = defaultdict(int)
+        weekday_count = 0
+        weekend_count = 0
+
+        for msg_id, data in events_raw:
+            ts = data.get("timestamp") or data.get("first_seen", "")
+            try:
+                if "." in str(ts):
+                    dt = datetime.fromtimestamp(float(ts), tz=TZ_LOCAL)
+                else:
+                    dt = datetime.fromisoformat(str(ts))
+                day_name = DAY_NAMES[dt.weekday()]
+                hour = dt.hour
+                heatmap[day_name][hour] += 1
+                hourly_total[hour] += 1
+                daily_total[day_name] += 1
+                if dt.weekday() < 5:
+                    weekday_count += 1
+                else:
+                    weekend_count += 1
+            except (ValueError, TypeError, OSError):
+                continue
+
+        # Peak hour overall
+        peak_hour = max(hourly_total.items(), key=lambda x: x[1]) if hourly_total else (0, 0)
+        # Busiest day
+        peak_day = max(daily_total.items(), key=lambda x: x[1]) if daily_total else ("none", 0)
+
+        # Format heatmap as readable grid
+        grid = {}
+        for day in DAY_NAMES:
+            row = {}
+            for h in range(24):
+                count = heatmap[day].get(h, 0)
+                if count > 0:
+                    row[f"{h:02d}:00"] = count
+            if row:
+                grid[day] = row
+
+        # Weekday vs weekend average (per day)
+        num_weekdays = max(min(days_back, 30) * 5 // 7, 1)
+        num_weekends = max(min(days_back, 30) * 2 // 7, 1)
+
+        return json.dumps({
+            "days_analyzed": days_back,
+            "total_events": len(events_raw),
+            "peak_hour": f"{peak_hour[0]:02d}:00 ({peak_hour[1]} events)",
+            "busiest_day": f"{peak_day[0]} ({peak_day[1]} events)",
+            "weekday_total": weekday_count,
+            "weekend_total": weekend_count,
+            "weekday_avg_per_day": round(weekday_count / num_weekdays, 1),
+            "weekend_avg_per_day": round(weekend_count / num_weekends, 1),
+            "heatmap": grid,
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
