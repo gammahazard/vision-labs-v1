@@ -16,6 +16,7 @@
 // DOM Elements
 // ---------------------------------------------------------------------------
 const conditionsPeriod = document.getElementById("conditionsPeriod");
+const nightWatchIcon = document.getElementById("nightWatchIcon");
 const condDate = document.getElementById("condDate");
 const condSunrise = document.getElementById("condSunrise");
 const condSunset = document.getElementById("condSunset");
@@ -80,6 +81,12 @@ async function loadConditions() {
         // Current period badge
         conditionsPeriod.textContent = PERIOD_LABELS[data.current_period] || data.current_period;
         conditionsPeriod.className = "conditions-period period-" + data.current_period;
+
+        // Show night watch icon during night/late_night (suppression disabled)
+        if (nightWatchIcon) {
+            const isNight = data.current_period === "night" || data.current_period === "late_night";
+            nightWatchIcon.classList.toggle("visible", isNight);
+        }
 
         // Sun data
         condSunrise.textContent = data.sunrise;
