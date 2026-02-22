@@ -19,7 +19,7 @@ An event-driven, microservices-based security camera system that detects people,
 | **Telegram notifications** | Real-time photo alerts broadcast to all approved users, per-user bot commands, dashboard-managed access control |
 | **Vehicle detection** | YOLOv8s detects cars, trucks, buses, motorcycles — snapshot + event feed |
 | **Self-learning** | User feedback trains suppression rules — fewer false alarms over time |
-| **AI assistant** | Local Qwen 3 14B via Ollama — 18 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules |
+| **AI assistant** | Local Qwen 3 14B via Ollama — 21 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules, activity heatmaps, record verdicts conversationally, show enrolled face photos |
 
 ---
 
@@ -262,16 +262,25 @@ Suppression is checked **before** the rate-limit timer — suppressed events don
 | Phase 6.1 | Dashboard authentication (login, sessions, password change) | Done |
 | Phase 6.2 | Vehicle detection (car/truck/bus/motorcycle) + event feed | Done |
 | Phase 6.5 | Self-learning feedback loop (Telegram buttons, review queue, suppression rules) | Done |
-| Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 18 tools | Done |
+| Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 21 tools | Done |
 | Phase 7.5 | Telegram Access Manager -- per-user auth, enrollment flow, access log, dashboard page | Done |
+| Phase 8 | Extended bot commands + AI tools -- /zones, /rules, /night, /faces, /timelapse, activity heatmap, record_verdict, show_faces | Done |
 
 ### Phase 7: AI Assistant
 
 A local Qwen 3 14B model (via Ollama, ~9.3 GB) adds natural language capabilities:
 - **Chat interface** -- dark-themed UI with onboarding wizard, suggestion chips, markdown + inline image rendering
-- **18 tools** -- query events/events by date/patterns, faces/unknowns, live scene, capture snapshot (with weather + scene description), capture 5-second video clip in chat, get weather, browse vehicles, zones, notification history, feedback stats, review feedback, retrain rules, send Telegram (text/snapshot/clip), schedule reminders, system status
+- **21 tools** -- query events/events by date/patterns/activity heatmap, faces/unknowns/show face photos, live scene, capture snapshot (with weather + scene description), capture 5-second video clip in chat, get weather, browse vehicles, zones, notification history, feedback stats, review feedback, retrain rules, send Telegram (text/snapshot/clip), schedule reminders, system status, record verdicts conversationally
 - **Runs entirely on-device** -- no cloud APIs, no data leaves the machine
 - **Extensibility roadmap** -- see ARCHITECTURE.md for 3-tier plan (smarter context → proactive intelligence → autonomous operation)
+
+### Phase 8: Extended Bot Commands & AI Tools
+
+Expanded Telegram bot and AI assistant capabilities:
+- **6 new bot commands** -- `/zones` (snapshot with zone overlays), `/rules` (suppression rules + stats), `/night` (night override status), `/faces` (enrolled people), `/timelapse [YYYY-MM-DD]` (MP4 from day's snapshots), `/events` (with snapshot thumbnails)
+- **3 new AI tools** -- `query_activity_heatmap` (day×hour cross-tabulation), `record_verdict` (conversational event classification), `show_faces` (display enrolled photos in chat)
+- **Night override awareness** -- `/night` command shows current period and active override status
+- **AI learning loop** -- `record_verdict` allows conversational feedback ("mark that as false alarm") while keeping the AI read-only on rule modification
 
 ### Future (All Just Redis Workers)
 

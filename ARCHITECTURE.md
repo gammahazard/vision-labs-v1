@@ -1,7 +1,7 @@
 # Vision Labs — Architecture Reference
 
 > **Last updated:** Feb 22, 2026
-> **Status:** Phases 0–7.5 complete. 18-tool AI assistant. Telegram Access Manager.
+> **Status:** Phases 0–8 complete. 21-tool AI assistant. Telegram Access Manager. Extended bot commands.
 > **Hardware:** RTX 3090 PC, Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
 
 This document is the definitive reference for how the system works. If you lose context, start here.
@@ -769,10 +769,10 @@ vision-labsv1/
 │       │   ├── feedback.py       # Feedback + suppression rules API (~123 lines)
 │       │   ├── browse.py         # Vehicle snapshot browser + faces gallery (~158 lines)
 │       │   ├── ai.py             # AI assistant chat endpoint (~309 lines)
-│       │   ├── ai_tools.py       # 18 AI tool schemas + executors (~1062 lines)
+│       │   ├── ai_tools.py       # 21 AI tool schemas + executors (~1350 lines)
 │       │   ├── ai_prompts.py     # Dynamic system prompt builder (~118 lines)
 │       │   ├── ai_state.py       # Per-request media side-channel (~94 lines)
-│       │   ├── bot_commands.py   # Telegram bot polling + commands (~812 lines)
+│       │   ├── bot_commands.py   # Telegram bot polling + 11 commands (~1170 lines)
 │       │   └── telegram_access.py # Telegram user CRUD + access log (~105 lines)
 │       └── static/
 │           ├── index.html        # Main dashboard layout (~554 lines)
