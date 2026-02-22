@@ -7,13 +7,13 @@ PURPOSE:
     external APIs, or performs actions and returns a JSON string result
     that the LLM uses to formulate its response.
 
-TOOLS (20):
+TOOLS (21):
     query_events, query_faces, query_feedback_stats, send_telegram,
     schedule_reminder, get_system_status, retrain_rules, review_feedback,
     get_live_scene, query_unknowns, query_events_by_date, query_zones,
     browse_vehicles, get_weather, query_event_patterns, capture_snapshot,
     capture_clip, query_notification_history, query_activity_heatmap,
-    record_verdict
+    record_verdict, show_faces
 """
 
 import os
@@ -366,6 +366,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_faces",
+            "description": "Show enrolled face photos. Sends up to 3 photos per person directly in the chat. Use when the user asks to see who is enrolled or wants to see face photos.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Optional: filter to a specific person's name. If omitted, shows all enrolled people.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -415,6 +432,8 @@ async def execute_tool(name: str, args: dict) -> str:
             return _tool_query_activity_heatmap(args)
         elif name == "record_verdict":
             return _tool_record_verdict(args)
+        elif name == "show_faces":
+            return await _tool_show_faces(args)
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -1247,5 +1266,85 @@ def _tool_record_verdict(args: dict) -> str:
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+async def _tool_show_faces(args: dict) -> str:
+    """Show enrolled face photos — up to 3 per person, sent as images."""
+    import base64
+    import httpx
+    from collections import defaultdict
+
+    filter_name = args.get("name", "").strip().lower()
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{ctx.FACE_API_URL}/api/faces")
+            if resp.status_code != 200:
+                return json.dumps({"error": f"Face API returned {resp.status_code}"})
+            data = resp.json()
+
+        faces = data.get("faces", [])
+        if not faces:
+            return json.dumps({"message": "No faces enrolled yet."})
+
+        # Group faces by name, keeping their IDs
+        by_name = defaultdict(list)
+        for f in faces:
+            name = f.get("name", "unnamed")
+            fid = f.get("id", "")
+            if fid:
+                by_name[name].append(fid)
+
+        # Filter to specific person if requested
+        if filter_name:
+            filtered = {
+                n: ids for n, ids in by_name.items()
+                if filter_name in n.lower()
+            }
+            if not filtered:
+                return json.dumps({
+                    "error": f"No enrolled person matching '{filter_name}'",
+                    "available": list(by_name.keys()),
+                })
+            by_name = filtered
+
+        # Fetch up to 3 photos per person and stash as images
+        images = []
+        summary = []
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for name, face_ids in by_name.items():
+                photos_to_fetch = face_ids[:3]  # Cap at 3 per person
+                fetched = 0
+                for fid in photos_to_fetch:
+                    try:
+                        photo_resp = await client.get(
+                            f"{ctx.FACE_API_URL}/api/faces/{fid}/photo"
+                        )
+                        if photo_resp.status_code == 200:
+                            b64 = base64.b64encode(photo_resp.content).decode("utf-8")
+                            angle_label = f"angle {fetched + 1}" if len(photos_to_fetch) > 1 else ""
+                            caption = f"{name} {angle_label}".strip()
+                            images.append({
+                                "url": f"data:image/jpeg;base64,{b64}",
+                                "caption": caption,
+                            })
+                            fetched += 1
+                    except Exception:
+                        continue
+                summary.append(f"{name}: {fetched}/{len(face_ids)} photo(s) shown")
+
+        if images:
+            ai_state.stash_images(images)
+
+        return json.dumps({
+            "photos_sent": len(images),
+            "people": list(by_name.keys()),
+            "summary": summary,
+            "instruction": "Face photos have been sent to the chat. Describe who is enrolled and how many photos each person has.",
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
 
 

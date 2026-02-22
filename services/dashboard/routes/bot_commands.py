@@ -1121,15 +1121,23 @@ async def _cmd_ask(chat_id: str = "", text: str = ""):
             except Exception as e:
                 logger.debug(f"Failed to send AI clip via Telegram: {e}")
 
-        # Browse images (vehicle snapshots etc.)
+        # Browse images (vehicle snapshots, face photos, etc.)
         if media["images"]:
-            for img_info in media["images"][:5]:  # Cap at 5
+            for img_info in media["images"][:10]:  # Cap at 10
                 try:
                     url = img_info.get("url", "")
                     caption = img_info.get("caption", "")
+
+                    # Base64 data URI (from show_faces, etc.)
+                    if url.startswith("data:image/"):
+                        import base64 as b64mod
+                        # "data:image/jpeg;base64,/9j/4A..."
+                        b64_data = url.split(",", 1)[1] if "," in url else ""
+                        if b64_data:
+                            img_bytes = b64mod.b64decode(b64_data)
+                            await send_photo(img_bytes, caption or "📷", chat_id=chat_id)
                     # Vehicle snapshots: /api/browse/snapshot/{date}/{filename}
-                    if url.startswith("/api/browse/snapshot/"):
-                        # Extract date/filename from URL path
+                    elif url.startswith("/api/browse/snapshot/"):
                         path_parts = url.replace("/api/browse/snapshot/", "").split("/", 1)
                         if len(path_parts) == 2:
                             date_part, fname = path_parts
