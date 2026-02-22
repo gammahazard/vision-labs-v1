@@ -673,6 +673,26 @@ async def poll_telegram_callbacks(feedback_db):
     else:
         logger.warning("Telegram poller started — NO user whitelist set (commands disabled)")
 
+    # Register bot command menu with Telegram
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{TELEGRAM_API}/setMyCommands",
+                json={"commands": [
+                    {"command": "snapshot", "description": "Live camera photo"},
+                    {"command": "clip", "description": "5-second video clip"},
+                    {"command": "status", "description": "System health"},
+                    {"command": "arm", "description": "Enable notifications"},
+                    {"command": "disarm", "description": "Disable notifications"},
+                    {"command": "who", "description": "Who's in frame now"},
+                    {"command": "help", "description": "List all commands"},
+                ]},
+                timeout=10,
+            )
+        logger.info("Telegram command menu registered")
+    except Exception as e:
+        logger.warning(f"Failed to register command menu: {e}")
+
     while True:
         try:
             async with httpx.AsyncClient() as client:
@@ -844,29 +864,38 @@ async def _cmd_who():
     try:
         r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
         state_key = f"state:{os.getenv('CAMERA_ID', 'front_door')}"
-        state_raw = r.get(state_key)
-        if not state_raw:
+        state = r.hgetall(state_key)
+        if not state:
             await send_text("👀 No detection state available — scene may be clear.")
             return
 
-        state = json.loads(state_raw)
-        people = state.get("people", [])
-        vehicles = state.get("vehicles", [])
-
         parts = ["👁️ <b>Current Scene</b>"]
-        if people:
-            parts.append(f"\u2022 People: {len(people)}")
-            for p in people[:5]:
-                name = p.get("identity", p.get("id", "unknown"))
-                action = p.get("action", "")
-                parts.append(f"  — {name}{f' ({action})' if action else ''}")
+
+        # People
+        num_people = int(state.get("num_people", "0"))
+        if num_people > 0:
+            parts.append(f"\u2022 People: {num_people}")
+            try:
+                people = json.loads(state.get("people", "[]"))
+                for p in people[:5]:
+                    name = p.get("identity_name", p.get("id", "unknown"))
+                    action = p.get("action", "")
+                    parts.append(f"  — {name}{f' ({action})' if action else ''}")
+            except json.JSONDecodeError:
+                pass
         else:
             parts.append("\u2022 People: none")
 
-        if vehicles:
-            parts.append(f"\u2022 Vehicles: {len(vehicles)}")
-            for v in vehicles[:5]:
-                parts.append(f"  — {v.get('class', 'vehicle')}")
+        # Vehicles (check if tracker publishes vehicle info)
+        num_vehicles = int(state.get("num_vehicles", "0"))
+        if num_vehicles > 0:
+            parts.append(f"\u2022 Vehicles: {num_vehicles}")
+            try:
+                vehicles = json.loads(state.get("vehicles", "[]"))
+                for v in vehicles[:5]:
+                    parts.append(f"  — {v.get('class', 'vehicle')}")
+            except json.JSONDecodeError:
+                pass
         else:
             parts.append("\u2022 Vehicles: none")
 
