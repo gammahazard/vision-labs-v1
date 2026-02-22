@@ -30,6 +30,7 @@ import redis
 import httpx
 
 import routes as ctx
+import routes.ai_state as ai_state
 from contracts.time_rules import get_time_period
 from routes.notifications import (
     is_configured, _is_authorized,
@@ -493,7 +494,7 @@ async def _cmd_help(chat_id: str = ""):
         "/rules — 📜 Active suppression rules\n"
         "/night — 🌙 Night mode status\n"
         "/faces — 👤 Enrolled faces\n"
-        "/timelapse [date] — ⏩ Timelapse from snapshots\n"
+        "/timelapse [YYYY-MM-DD] — ⏩ Timelapse from snapshots\n"
         "/ask [question] — 🧠 Ask the AI assistant\n\n"
         "🔒 <b>Admin Only</b>\n"
         "/arm — 🟢 Enable notifications\n"
@@ -687,7 +688,7 @@ async def _cmd_zones(chat_id: str = ""):
 async def _cmd_rules(chat_id: str = ""):
     """List active suppression rules and feedback stats."""
     try:
-        from server import feedback_db as _fdb
+        _fdb = ai_state._feedback_db
         if not _fdb:
             await send_text("⚠️ Feedback system not initialized", chat_id=chat_id)
             return
@@ -775,7 +776,7 @@ async def _cmd_faces(chat_id: str = ""):
     """List enrolled/known faces."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{ctx.FACE_API_URL}/api/faces/list")
+            resp = await client.get(f"{ctx.FACE_API_URL}/api/faces")
             if resp.status_code != 200:
                 await send_text("⚠️ Face recognizer service unavailable", chat_id=chat_id)
                 return
