@@ -180,7 +180,7 @@ services:
       - REDIS_PORT=6379
       - MODEL_NAME=/models/yolov8s.pt
       - CONFIDENCE_THRESH=0.4
-      - FRAME_SKIP=3
+      - FRAME_SKIP=1
     volumes:
       - ./contracts:/app/contracts:ro
       - yolo-models:/models

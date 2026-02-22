@@ -130,7 +130,7 @@ def setup_consumer_group(r: redis.Redis) -> None:
     each frame is processed by exactly ONE detector in the group.
     """
     try:
-        r.xgroup_create(FRAME_STREAM, CONSUMER_GROUP, id="0", mkstream=True)
+        r.xgroup_create(FRAME_STREAM, CONSUMER_GROUP, id="$", mkstream=True)
         logger.info(f"Created consumer group '{CONSUMER_GROUP}' on '{FRAME_STREAM}'")
     except redis.ResponseError as e:
         if "BUSYGROUP" in str(e):

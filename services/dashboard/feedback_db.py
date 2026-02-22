@@ -231,7 +231,16 @@ class FeedbackDB:
         """
         Check if this event matches any active suppression rule.
         Returns True if the notification should be suppressed.
+
+        SECURITY OVERRIDE: Never suppress during night or late_night.
+        Any detection at those hours is unusual and should always alert.
         """
+        # --- Night override: always alert during night/late_night ---
+        if time_period in ("night", "late_night"):
+            logger.debug(
+                f"Night override: suppression skipped during {time_period}"
+            )
+            return False
         conn = self._get_conn()
         try:
             rules = conn.execute(

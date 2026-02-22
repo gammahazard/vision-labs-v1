@@ -16,7 +16,7 @@ An event-driven, microservices-based security camera system that detects people,
 | **Action classification** | Standing, sitting, crouching, lying down, arms raised -- pure geometry on pose keypoints |
 | **Face recognition** | InsightFace `buffalo_l` generates 512-dim embeddings, cosine-matched against enrolled faces |
 | **Zone-based alerting** | Draw polygonal zones on the camera view, set time-based alert rules (always, night only, dead zone) |
-| **Telegram notifications** | Real-time photo alerts when people are detected or identified |
+| **Telegram notifications** | Real-time photo alerts broadcast to all approved users, per-user bot commands, dashboard-managed access control |
 | **Vehicle detection** | YOLOv8s detects cars, trucks, buses, motorcycles — snapshot + event feed |
 | **Self-learning** | User feedback trains suppression rules — fewer false alarms over time |
 | **AI assistant** | Local Qwen 3 14B via Ollama — 18 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules |
@@ -105,7 +105,8 @@ docker compose up -d --build
 | `CAMERA_USER` | Yes | RTSP username (usually `admin`) |
 | `CAMERA_PASSWORD` | Yes | RTSP password |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot for mobile push notifications |
-| `TELEGRAM_CHAT_ID` | No | Your Telegram chat ID for receiving alerts |
+| `TELEGRAM_CHAT_ID` | No | Your Telegram chat ID (seeds the first admin user) |
+| `TELEGRAM_ALLOWED_USERS` | No | Comma-separated Telegram user IDs to seed on first startup |
 | `OPENWEATHER_API_KEY` | No | Weather data for the conditions panel |
 | `LOCATION_NAME` | No | Location label (e.g. "Home") |
 | `LOCATION_LAT` | No | Latitude for sunrise/sunset calculations |
@@ -126,6 +127,7 @@ The web dashboard is accessible from any device on your LAN at port 8080. No app
 - **Event feed** -- scrolling list of detection events with inline face photo thumbnails
 - **Zone editor** -- draw polygonal zones directly on the camera feed with drag-to-edit vertices, set alert levels per zone
 - **Face enrollment wizard** -- guided multi-angle capture (front, left, right, up, down) with live oval face guide
+- **Telegram Access Manager** -- approve/revoke bot users from dashboard, access audit log, one-click enrollment from denied attempts
 - **Unknown faces gallery** -- auto-captured unknowns with one-click label/dismiss
 - **Conditions panel** -- current time period (daytime/twilight/night), sunrise/sunset, live weather
 - **Settings** -- adjustable confidence, IoU threshold, lost timeout -- all hot-reload, no container restart needed
@@ -213,30 +215,36 @@ When configured with a Telegram bot token, the system sends real-time alerts wit
 
 ## Self-Learning Feedback Loop (Phase 6.5)
 
-This is the core differentiator: **the system starts by alerting on everything, then learns from your feedback to filter noise.**
+**The system starts by alerting on everything, then learns from your feedback to filter noise.** No ML retraining — a deterministic rule engine builds suppression rules from your verdict patterns.
 
-### The Three Stages
+### How It Works
 
-| Stage | When | Behavior | Notifications |
-|-------|------|----------|--------------|
-| **Observer** | Week 1-2 | Alerts on everything, asks for feedback | ~15-20/day |
-| **Suggest** | Week 3-4 | Auto-suppresses obvious noise, asks about ambiguous | ~3-5/day |
-| **Autonomous** | Month 2+ | Only alerts on events you've historically cared about | ~0-2/day |
+Every Telegram notification includes three inline buttons:
+- **✅ Real Alert** — confirms this was a genuine detection
+- **❌ Not Needed** — marks as false alarm (drives rule creation)
+- **🏷️ Tag** — identify the person (delivery, neighbor, shadow, etc.)
 
-### What It Learns
+You can also classify events from the **dashboard review queue** with thumbnails, or ask the AI assistant to retrain rules at any time.
 
-A deterministic suppression rule engine builds rules from your feedback patterns:
+### Auto-Suppression Rules
 
-- **Identity-based rules** -- after 3+ false alarms for the same person (e.g., "Mail Carrier"), auto-suppress future alerts
-- **Zone + time rules** -- after 5+ false alarms in the same zone at the same time of day, auto-suppress
+The engine creates rules automatically from accumulated `false_alarm` verdicts:
 
-### How You Teach It
+| Rule Type | Threshold | Example | Effect |
+|-----------|-----------|---------|--------|
+| **Identity** | 3 false alarms | "Mail Carrier" marked false 3× | All future alerts for that person suppressed |
+| **Zone + Time** | 5 false alarms | "Driveway" + "daytime" marked false 5× | All alerts in that zone during that time period suppressed |
 
-- **Telegram inline buttons** on every notification: Real Alert / Not Needed / Tag (delivery, neighbor, shadow)
-- **Dashboard review queue** for batch approve/reject with thumbnails
-- **AI-triggered retrain** -- ask the AI assistant to retrain the suppression model at any time
+Suppression is checked **before** the rate-limit timer — suppressed events don't burn your notification cooldown window. Rules can be toggled on/off or deleted from the dashboard at any time, and `retrain` wipes and rebuilds all rules from scratch.
 
 > **No YOLO or InsightFace retraining.** Those are frozen foundation models. The suppression engine is a thin decision layer on top that learns your personal alert preferences.
+
+### Known Limitations
+
+- **Night override** — all suppression rules are bypassed during **night and late_night** time periods. Any person detected at those hours always triggers a notification, even if they're a known suppressed identity. Dead zones still apply 24/7 (enforced at the tracker level, not the notification layer).
+- **No action awareness** — zone+time rules don't consider what the person is doing (crouching vs walking). Rules suppress all actions equally.
+- **No negative feedback loop** — marking "Real Threat" confirms the alert was valid but doesn't strengthen future alerts for similar patterns. Only false alarms drive rule creation.
+- **Progression is emergent, not explicit** — there are no formal "stages." The system naturally sends fewer notifications as rules accumulate, but there's no stage-tracking or mode-switching logic.
 
 ---
 
@@ -255,9 +263,9 @@ A deterministic suppression rule engine builds rules from your feedback patterns
 | Phase 6.2 | Vehicle detection (car/truck/bus/motorcycle) + event feed | Done |
 | Phase 6.5 | Self-learning feedback loop (Telegram buttons, review queue, suppression rules) | Done |
 | Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 18 tools | Done |
-| Phase 8 | OpenPLC integration -- Modbus TCP bridge, ladder logic decisions | Planned |
+| Phase 7.5 | Telegram Access Manager -- per-user auth, enrollment flow, access log, dashboard page | Done |
 
-### Phase 7: AI Assistant (Done)
+### Phase 7: AI Assistant
 
 A local Qwen 3 14B model (via Ollama, ~9.3 GB) adds natural language capabilities:
 - **Chat interface** -- dark-themed UI with onboarding wizard, suggestion chips, markdown + inline image rendering
@@ -265,18 +273,9 @@ A local Qwen 3 14B model (via Ollama, ~9.3 GB) adds natural language capabilitie
 - **Runs entirely on-device** -- no cloud APIs, no data leaves the machine
 - **Extensibility roadmap** -- see ARCHITECTURE.md for 3-tier plan (smarter context → proactive intelligence → autonomous operation)
 
-### Phase 8: OpenPLC (Planned)
-
-Bridges AI detections to industrial PLC ladder logic:
-- AI serves as the sensor (input signal)
-- PLC makes decisions via ladder diagrams
-- Outputs drive actions (alerts now, physical relays/lights in the future)
-- PLC rules are editable without touching AI code
-
-### Additional Features (All Just Redis Workers)
+### Future (All Just Redis Workers)
 
 - Event clip recording (10s clips around detections, archived to NAS)
-- Vehicle speed estimation
 - License plate reader (YOLO + PaddleOCR)
 - Vehicle re-identification (same car tracking across visits)
 - Cross-camera person tracking
@@ -338,10 +337,11 @@ vision-labs/
 |       |-- server.py             # App factory, WebSocket handler, middleware
 |       |-- feedback_db.py        # Feedback + suppression rules (SQLite)
 |       |-- ai_db.py              # AI config + reminders + chat history (SQLite)
-|       |-- routes/               # Modular API endpoints (events, faces, zones, auth, feedback, ai)
+|       |-- routes/               # Modular API endpoints (events, faces, zones, auth, feedback, ai, telegram)
 |       +-- static/               # HTML/JS/CSS (no build step, no framework)
 |           |-- index.html         # Dashboard (live feed, sidebar panels)
 |           |-- ai.html            # AI assistant (onboarding wizard + chat)
+|           |-- telegram.html      # Telegram Access Manager (users + access log)
 |           +-- login.html         # Authentication page
 |
 +-- tests/                        # Unit + integration tests (no GPU/Redis required)

@@ -28,6 +28,10 @@
                 style="padding:0.4rem 0.9rem;border-radius:8px;text-decoration:none;color:#94a3b8;font-size:0.88rem;font-weight:500;"
                 onmouseover="this.style.color='#f1f5f9';this.style.background='#1a2235'"
                 onmouseout="this.style.color='#94a3b8';this.style.background='transparent'">🤖 AI</a>
+            <a href="/telegram.html"
+                style="padding:0.4rem 0.9rem;border-radius:8px;text-decoration:none;color:#94a3b8;font-size:0.88rem;font-weight:500;"
+                onmouseover="this.style.color='#f1f5f9';this.style.background='#1a2235'"
+                onmouseout="this.style.color='#94a3b8';this.style.background='transparent'">🔐 Telegram</a>
         </div>
     </div>
     <div style="display:flex;align-items:center;gap:1rem;">
@@ -347,6 +351,25 @@
                             onchange="updateNotifPref('suppress_known', this.checked ? '1' : '0')">
                     </label>
                     <p class="setting-hint">Skip alerts for people already identified by name</p>
+                </div>
+                <!-- Cooldown Sliders -->
+                <div class="setting notification-pref">
+                    <label class="setting-label">⏱️ Person alert cooldown
+                        <span id="notifyCooldownValue" class="setting-value">60s</span>
+                    </label>
+                    <input type="range" id="notifyCooldownSlider" min="10" max="300" step="10" value="60"
+                        oninput="document.getElementById('notifyCooldownValue').textContent=this.value+'s'"
+                        onchange="updateNotifPref('notify_cooldown', this.value)">
+                    <p class="setting-hint">Minimum seconds between person alerts (10–300)</p>
+                </div>
+                <div class="setting notification-pref">
+                    <label class="setting-label">⏱️ Vehicle alert cooldown
+                        <span id="vehicleCooldownValue" class="setting-value">120s</span>
+                    </label>
+                    <input type="range" id="vehicleCooldownSlider" min="10" max="600" step="10" value="120"
+                        oninput="document.getElementById('vehicleCooldownValue').textContent=this.value+'s'"
+                        onchange="updateNotifPref('vehicle_cooldown', this.value)">
+                    <p class="setting-hint">Minimum seconds between vehicle alerts (10–600)</p>
                 </div>
                 <div class="setting">
                     <button class="btn btn-primary" id="testNotificationBtn" onclick="testNotification()">

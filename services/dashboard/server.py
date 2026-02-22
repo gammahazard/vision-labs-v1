@@ -54,6 +54,8 @@ from streams import (
     ZONE_KEY as _ZONE_TMPL,
     HD_FRAME_KEY as _HD_TMPL,
     VEHICLE_STREAM as _VEH_DET_TMPL,
+    TELEGRAM_USERS_KEY as _TG_USERS_KEY,
+    TELEGRAM_ACCESS_LOG as _TG_ACCESS_LOG,
     stream_key,
 )
 
@@ -82,8 +84,10 @@ def _bbox_iou(box_a: list, box_b: list) -> float:
 def _in_dead_zone(bbox: list, frame_w: int, frame_h: int, zone_cache: dict) -> bool:
     """
     Check if a bbox center falls inside any dead_zone.
-    Uses ray-casting point-in-polygon (same algorithm as contracts/zones.py).
+    Delegates to contracts/time_rules.py point_in_polygon (single source of truth).
     """
+    from contracts.time_rules import point_in_polygon
+
     if not zone_cache or len(bbox) != 4:
         return False
 
@@ -96,17 +100,7 @@ def _in_dead_zone(bbox: list, frame_w: int, frame_h: int, zone_cache: dict) -> b
         pts = zone.get("points", [])
         if len(pts) < 3:
             continue
-        # Ray-casting algorithm
-        inside = False
-        n = len(pts)
-        j = n - 1
-        for i in range(n):
-            xi, yi = pts[i]
-            xj, yj = pts[j]
-            if ((yi > cy) != (yj > cy)) and (cx < (xj - xi) * (cy - yi) / (yj - yi) + xi):
-                inside = not inside
-            j = i
-        if inside:
+        if point_in_polygon(cx, cy, pts):
             return True
     return False
 
@@ -161,8 +155,9 @@ logger = logging.getLogger("dashboard")
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Vision Labs Dashboard")
 
-# Redis connection (sync client for REST endpoints)
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+# Redis connections
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)       # text
+r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)   # binary (JPEG frames)
 
 # Auth database path (Docker volume for persistence)
 AUTH_DB_PATH = os.getenv("AUTH_DB_PATH", "/data/auth.db")
@@ -174,6 +169,7 @@ AUTH_DB_PATH = os.getenv("AUTH_DB_PATH", "/data/auth.db")
 import routes as route_ctx
 
 route_ctx.r = r
+route_ctx.r_bin = r_bin
 route_ctx.logger = logger
 route_ctx.FACE_API_URL = FACE_API_URL
 route_ctx.EVENT_STREAM = EVENT_STREAM
@@ -191,6 +187,8 @@ os.makedirs(VEHICLE_SNAPSHOT_DIR, exist_ok=True)
 route_ctx.VEHICLE_SNAPSHOT_DIR = VEHICLE_SNAPSHOT_DIR
 route_ctx.CAMERA_ID = CAMERA_ID
 route_ctx.HD_FRAME_KEY = HD_FRAME_KEY
+route_ctx.TELEGRAM_USERS_KEY = _TG_USERS_KEY
+route_ctx.TELEGRAM_ACCESS_LOG = _TG_ACCESS_LOG
 
 from routes.events import router as events_router
 from routes.config import router as config_router
@@ -203,6 +201,7 @@ from routes.auth import router as auth_router, init_auth_db, validate_session
 from routes.browse import router as browse_router
 from routes.feedback import router as feedback_router, set_feedback_db
 from routes.ai import router as ai_router, set_ai_db, set_feedback_db as ai_set_feedback_db, set_gpu_ready_flag
+from routes.telegram_access import router as telegram_access_router
 
 app.include_router(events_router)
 app.include_router(config_router)
@@ -215,6 +214,7 @@ app.include_router(auth_router)
 app.include_router(browse_router)
 app.include_router(feedback_router)
 app.include_router(ai_router)
+app.include_router(telegram_access_router)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ async def startup():
     asyncio.create_task(_event_notification_poller())
 
     # Start Telegram callback poller (receives inline button taps)
-    from routes.notifications import poll_telegram_callbacks
+    from routes.bot_commands import poll_telegram_callbacks
     asyncio.create_task(poll_telegram_callbacks(_feedback_db))
 
     # Start reminder poller (checks every 60s for due reminders)
@@ -365,7 +365,7 @@ async def _ensure_ollama_model():
         logger.info(f"Warming up AI model '{model}' (loading into GPU memory)...")
 
         # Access the AI DB that was set up by startup
-        from routes.ai import _ai_db
+        from routes.ai_state import _ai_db
         startup_msg = "⚡ System restart detected — loading AI model into memory..."
 
         try:
@@ -430,26 +430,39 @@ async def _event_notification_poller():
 
     loop = asyncio.get_event_loop()
 
-    def _save_snapshot(event_id: str, bbox_json: str = ""):
-        """Grab the latest camera frame and save it as a JPEG for this event.
-        Prefers the HD frame for clearer snapshots. Falls back to sub-stream.
-        If bbox_json is provided (JSON list [x1,y1,x2,y2] in sub-stream pixel
-        coords), scales it to the snapshot resolution and draws a bright
-        highlight rectangle so the user can see which detection this refers to.
+    def _save_snapshot(event_id: str, bbox_json: str = "", snapshot_key: str = ""):
+        """Save a snapshot JPEG for this event.
+        If snapshot_key is provided (set by tracker at detection time), uses
+        that frame from Redis instead of the live frame. This ensures the
+        snapshot matches the actual detection moment.
+        Falls back to HD/sub-stream live frame if no snapshot_key.
+
+        Returns the RAW frame bytes (before bbox annotation) so the caller
+        can forward them to the Telegram notification.
         """
         try:
-            # --- Try HD frame first (clearer image) ---
-            r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT,
-                                decode_responses=False)
-            hd_bytes = r_bin.get(HD_FRAME_KEY.encode())
-            sd_frame = get_sd_frame()  # Always sub-stream for bbox scaling reference
+            r_bin = route_ctx.r_bin
 
-            # Pick best available frame
-            frame = hd_bytes if hd_bytes else sd_frame
-            is_hd = bool(hd_bytes)
+            # --- Prefer tracker-saved snapshot (matches detection frame) ---
+            frame = None
+            is_hd = False
+            sd_frame = get_sd_frame()  # Always needed for bbox scaling reference
+            if snapshot_key:
+                frame = r_bin.get(snapshot_key.encode() if isinstance(snapshot_key, str) else snapshot_key)
+                if frame:
+                    is_hd = True  # Tracker prefers HD too
+
+            # --- Fall back to live frame ---
+            if not frame:
+                hd_bytes = r_bin.get(HD_FRAME_KEY.encode())
+                frame = hd_bytes if hd_bytes else sd_frame
+                is_hd = bool(hd_bytes)
 
             if not frame:
-                return
+                return None
+
+            # Keep a copy of the raw frame for the notification
+            raw_frame = frame
 
             # Draw bbox highlight if provided
             if bbox_json:
@@ -489,8 +502,11 @@ async def _event_notification_poller():
             path = os.path.join(SNAPSHOT_DIR, f"{safe_id}.jpg")
             with open(path, "wb") as f:
                 f.write(frame)
+
+            return raw_frame
         except Exception as e:
             logger.debug(f"Snapshot save failed for {event_id}: {e}")
+            return None
 
     def _cleanup_old_snapshots():
         """Remove snapshots older than SNAPSHOT_MAX_AGE."""
@@ -510,8 +526,7 @@ async def _event_notification_poller():
         vehicles/YYYY-MM-DD/HH-MM-SS_class.jpg
         """
         try:
-            # Use a separate raw-bytes Redis client (decode_responses=False)
-            r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+            r_bin = route_ctx.r_bin
             jpeg_data = r_bin.get(snapshot_key.encode() if isinstance(snapshot_key, str) else snapshot_key)
             if not jpeg_data:
                 return
@@ -579,32 +594,37 @@ async def _event_notification_poller():
                         if event_type == "person_appeared":
                             # Always save snapshot with highlighted bbox
                             bbox_json = data.get("bbox", "")
-                            await loop.run_in_executor(
-                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                            evt_snap_key = data.get("snapshot_key", "")
+                            snap_bytes = await loop.run_in_executor(
+                                None, lambda eid=msg_id, bb=bbox_json, sk=evt_snap_key: _save_snapshot(eid, bb, sk)
                             )
                             # Send Telegram if person notifications enabled
                             if is_configured() and notify_person:
                                 await notify_person_detected(
-                                    data, event_id=msg_id, feedback_db=fdb
+                                    data, event_id=msg_id, feedback_db=fdb,
+                                    snapshot_bytes=snap_bytes,
                                 )
 
                         elif event_type == "person_identified":
                             # Save snapshot with highlighted bbox for feedback modal
                             bbox_json = data.get("bbox", "")
-                            await loop.run_in_executor(
-                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                            evt_snap_key = data.get("snapshot_key", "")
+                            snap_bytes = await loop.run_in_executor(
+                                None, lambda eid=msg_id, bb=bbox_json, sk=evt_snap_key: _save_snapshot(eid, bb, sk)
                             )
                             # Skip if suppress_known is on (known people don't alert)
                             if is_configured() and notify_person and not suppress_known:
                                 await notify_person_identified(
-                                    data, event_id=msg_id, feedback_db=fdb
+                                    data, event_id=msg_id, feedback_db=fdb,
+                                    snapshot_bytes=snap_bytes,
                                 )
 
                         elif event_type == "vehicle_detected":
                             # Save event snapshot with highlighted bbox for event detail modal
                             bbox_json = data.get("bbox", "")
+                            evt_snap_key = data.get("snapshot_key", "")
                             await loop.run_in_executor(
-                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                                None, lambda eid=msg_id, bb=bbox_json, sk=evt_snap_key: _save_snapshot(eid, bb, sk)
                             )
                             # Also save vehicle snapshot to disk in day folder
                             snapshot_key = data.get("snapshot_key", "")
@@ -616,8 +636,9 @@ async def _event_notification_poller():
                         elif event_type == "vehicle_idle":
                             # Save snapshot with highlighted bbox for feedback modal
                             bbox_json = data.get("bbox", "")
-                            await loop.run_in_executor(
-                                None, lambda eid=msg_id, bb=bbox_json: _save_snapshot(eid, bb)
+                            evt_snap_key = data.get("snapshot_key", "")
+                            snap_bytes = await loop.run_in_executor(
+                                None, lambda eid=msg_id, bb=bbox_json, sk=evt_snap_key: _save_snapshot(eid, bb, sk)
                             )
                             # Save vehicle snapshot to disk too
                             snapshot_key = data.get("snapshot_key", "")
@@ -627,7 +648,8 @@ async def _event_notification_poller():
                                 )
                             if is_configured() and notify_vehicle:
                                 await notify_vehicle_idle(
-                                    data, event_id=msg_id, feedback_db=fdb
+                                    data, event_id=msg_id, feedback_db=fdb,
+                                    snapshot_bytes=snap_bytes,
                                 )
 
             # Periodic cleanup every ~100 iterations (~200s)
@@ -916,25 +938,27 @@ async def websocket_live(ws: WebSocket):
 
                                 vcolor = (0, 140, 255)  # Orange (BGR)
                                 vlabel = f"{vclass} {vconf:.0%}"
-                                cv2.rectangle(frame, (vx1, vy1), (vx2, vy2), vcolor, 2)
+                                # Wider + thinner box: pad horizontally, use thin lines
+                                pad_x = 6
+                                cv2.rectangle(frame, (vx1 - pad_x, vy1), (vx2 + pad_x, vy2), vcolor, 1)
                                 vlabel_size = cv2.getTextSize(
-                                    vlabel, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+                                    vlabel, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
                                 )[0]
                                 cv2.rectangle(
                                     frame,
-                                    (vx1, vy1 - vlabel_size[1] - 10),
-                                    (vx1 + vlabel_size[0] + 4, vy1),
+                                    (vx1 - pad_x, vy1 - vlabel_size[1] - 8),
+                                    (vx1 - pad_x + vlabel_size[0] + 4, vy1),
                                     vcolor,
                                     -1,
                                 )
                                 cv2.putText(
                                     frame,
                                     vlabel,
-                                    (vx1 + 2, vy1 - 5),
+                                    (vx1 - pad_x + 2, vy1 - 4),
                                     cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.6,
+                                    0.5,
                                     (0, 0, 0),
-                                    2,
+                                    1,
                                 )
                 except Exception:
                     pass  # Vehicle stream may not be available

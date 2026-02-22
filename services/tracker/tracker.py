@@ -65,6 +65,9 @@ from streams import (
     VEHICLE_STREAM as _VEH_TMPL,
     VEHICLE_SNAPSHOT_KEY as _VSNAP_TMPL,
     VEHICLE_SNAPSHOT_BBOX_KEY as _VSNAP_BBOX_TMPL,
+    PERSON_SNAPSHOT_KEY as _PSNAP_TMPL,
+    FRAME_STREAM as _FRAME_TMPL,
+    HD_FRAME_KEY as _HD_FRAME_TMPL,
     stream_key,
 )
 
@@ -88,9 +91,11 @@ VEHICLE_STREAM = stream_key(_VEH_TMPL, camera_id=CAMERA_ID)
 CONFIG_KEY = stream_key(_CFG_TMPL, camera_id=CAMERA_ID)
 ZONE_KEY = stream_key(_ZONE_TMPL, camera_id=CAMERA_ID)
 IDENTITY_KEY = stream_key(_IDKEY_TMPL, camera_id=CAMERA_ID)
+FRAME_STREAM = stream_key(_FRAME_TMPL, camera_id=CAMERA_ID)
+HD_FRAME_KEY = stream_key(_HD_FRAME_TMPL, camera_id=CAMERA_ID)
 
 MAX_EVENT_STREAM_LEN = 5000  # Keep more events than frames (they're small)
-VEHICLE_RATE_LIMIT_SEC = 10  # Max 1 vehicle event per 10 seconds
+VEHICLE_RATE_LIMIT_SEC = 3  # Max 1 vehicle event per 3 seconds
 VEHICLE_IDLE_TIMEOUT = float(os.getenv("VEHICLE_IDLE_TIMEOUT", "5.0"))  # Seconds before idle alert
 VEHICLE_LOST_TIMEOUT = 10.0  # Seconds before dropping a tracked vehicle
 VEHICLE_IOU_THRESHOLD = 0.2  # Lower than person IoU — vehicles don't move much when parked
@@ -365,6 +370,14 @@ class PersonTracker:
             "alert_triggered": str(alert_triggered),
             "time_period": get_time_period(),
         }
+
+        # Save a snapshot at event emission time for person events
+        # so the dashboard uses the correct frame, not the (stale) live frame
+        if event_type in ("person_appeared", "person_identified"):
+            snap_key = self._save_person_snapshot(timestamp)
+            if snap_key:
+                event["snapshot_key"] = snap_key
+
         if extra:
             event.update(extra)
 
@@ -379,6 +392,30 @@ class PersonTracker:
             f"duration={person.duration:.1f}s | direction={person.direction}"
             f"{zone_str}"
         )
+
+    def _save_person_snapshot(self, timestamp: float) -> str | None:
+        """
+        Grab the latest camera frame and save it to Redis for this person event.
+        Returns the Redis key or None if no frame available.
+        Uses 2h TTL (matches dashboard snapshot cleanup).
+        """
+        try:
+            # Prefer HD frame for clearer snapshots
+            frame_bytes = self.r.get(HD_FRAME_KEY.encode())
+            if not frame_bytes:
+                # Fall back to latest sub-stream frame
+                entries = self.r.xrevrange(FRAME_STREAM.encode(), count=1)
+                if entries:
+                    frame_bytes = entries[0][1].get(b"frame") or entries[0][1].get(b"frame_bytes")
+            if not frame_bytes:
+                return None
+
+            snap_key = stream_key(_PSNAP_TMPL, camera_id=CAMERA_ID, timestamp=int(timestamp))
+            self.r.setex(snap_key, 7200, frame_bytes)  # 2h TTL
+            return snap_key
+        except Exception as e:
+            logger.debug(f"Person snapshot save failed: {e}")
+            return None
 
     def _process_vehicle_detections(self, detections: list, timestamp: float, frame_bytes: bytes = None):
         """

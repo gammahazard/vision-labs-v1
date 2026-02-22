@@ -57,6 +57,8 @@ REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 MODEL_NAME = os.getenv("MODEL_NAME", "yolov8s-pose.pt")
 CONFIDENCE_THRESH = float(os.getenv("CONFIDENCE_THRESH", "0.5"))
+MIN_KEYPOINTS = int(os.getenv("MIN_KEYPOINTS", "3"))           # Min visible body keypoints to accept
+KP_CONFIDENCE_THRESH = float(os.getenv("KP_CONFIDENCE_THRESH", "0.3"))  # Keypoint visibility threshold
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "pose_detectors")
 CONSUMER_NAME = os.getenv("CONSUMER_NAME", "detector_1")
 
@@ -158,7 +160,8 @@ def decode_frame(frame_bytes: bytes) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Detection Formatting
 # ---------------------------------------------------------------------------
-def format_detections(results) -> list[dict]:
+def format_detections(results, min_keypoints: int = MIN_KEYPOINTS,
+                      kp_conf_thresh: float = KP_CONFIDENCE_THRESH) -> list[dict]:
     """
     Convert YOLO results into a clean list of detection dictionaries.
 
@@ -173,6 +176,13 @@ def format_detections(results) -> list[dict]:
     5: left_shoulder, 6: right_shoulder, 7: left_elbow, 8: right_elbow,
     9: left_wrist, 10: right_wrist, 11: left_hip, 12: right_hip,
     13: left_knee, 14: right_knee, 15: left_ankle, 16: right_ankle
+
+    Keypoint quality filter:
+    If the model provides keypoints, we require at least `min_keypoints`
+    body keypoints (indices 5-16: shoulders through ankles) to have
+    confidence >= kp_conf_thresh. This eliminates false positives from
+    objects that look person-shaped (lamp posts, bushes, shadows) but
+    lack plausible body structure.
     """
     detections = []
 
@@ -204,9 +214,21 @@ def format_detections(results) -> list[dict]:
             if keypoints is not None and i < len(keypoints):
                 kps = keypoints[i].data.cpu().numpy().tolist()
                 # kps shape: [17, 3] — each keypoint is [x, y, confidence]
-                detection["keypoints"] = [
+                kp_list = [
                     [round(v, 1) for v in kp] for kp in kps[0]
                 ]
+                detection["keypoints"] = kp_list
+
+                # --- Keypoint quality filter ---
+                # Check body keypoints only (indices 5-16: shoulders → ankles)
+                # Skip face points (0-4) since they're often occluded
+                body_kps = kp_list[5:]  # 12 body keypoints
+                visible_count = sum(
+                    1 for kp in body_kps if kp[2] >= kp_conf_thresh
+                )
+                if visible_count < min_keypoints:
+                    # Not enough visible body keypoints — likely a false positive
+                    continue
 
             detections.append(detection)
 
@@ -244,6 +266,11 @@ def run():
     total_inference_time = 0.0
     last_log_time = time.time()
     current_confidence = CONFIDENCE_THRESH
+    current_min_keypoints = MIN_KEYPOINTS
+    current_kp_confidence = KP_CONFIDENCE_THRESH
+
+    logger.info(f"Keypoint quality filter: min_keypoints={current_min_keypoints}, "
+                f"kp_confidence>={current_kp_confidence}")
 
     while not _shutdown:
         # Read next frame from the consumer group
@@ -278,7 +305,7 @@ def run():
                     r.xack(FRAME_STREAM, CONSUMER_GROUP, message_id)
                     continue
 
-                # Hot-reload confidence from Redis config (set by dashboard)
+                # Hot-reload confidence + keypoint thresholds from Redis config
                 if frames_processed % CONFIG_RELOAD_INTERVAL == 0:
                     try:
                         cfg = r.hget(CONFIG_KEY, "confidence_thresh")
@@ -287,6 +314,18 @@ def run():
                             if new_conf != current_confidence:
                                 logger.info(f"Config updated: confidence {current_confidence} → {new_conf}")
                                 current_confidence = new_conf
+                        kp_cfg = r.hget(CONFIG_KEY, "min_keypoints")
+                        if kp_cfg:
+                            new_kp = int(kp_cfg)
+                            if new_kp != current_min_keypoints:
+                                logger.info(f"Config updated: min_keypoints {current_min_keypoints} → {new_kp}")
+                                current_min_keypoints = new_kp
+                        kpc_cfg = r.hget(CONFIG_KEY, "kp_confidence_thresh")
+                        if kpc_cfg:
+                            new_kpc = float(kpc_cfg)
+                            if new_kpc != current_kp_confidence:
+                                logger.info(f"Config updated: kp_confidence {current_kp_confidence} → {new_kpc}")
+                                current_kp_confidence = new_kpc
                     except (ValueError, redis.ConnectionError):
                         pass  # Keep current value on error
 
@@ -295,8 +334,12 @@ def run():
                 results = model(frame, conf=current_confidence, verbose=False)
                 inference_time = time.time() - t_start
 
-                # Format detections
-                detections = format_detections(results)
+                # Format detections (with keypoint quality filter)
+                detections = format_detections(
+                    results,
+                    min_keypoints=current_min_keypoints,
+                    kp_conf_thresh=current_kp_confidence,
+                )
 
                 # Publish detections to Redis
                 detection_data = {

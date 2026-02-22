@@ -90,9 +90,10 @@ function renderEvent(evt) {
     const isFaceEvent = evt.event_type === "face_reconciled" || evt.event_type === "face_enrolled" || evt.event_type === "person_identified";
     const isVehicle = evt.event_type === "vehicle_detected";
     const isVehicleIdle = evt.event_type === "vehicle_idle";
+    const isUnauthorized = evt.event_type === "unauthorized_access";
     const isAlert = evt.alert_triggered === "True" || evt.alert_triggered === "true";
 
-    item.className = `event-item ${isAppeared ? "appeared" : ""} ${isLeft ? "left" : ""} ${isAlert ? "alert" : ""} ${isFaceEvent || isActionChanged ? "appeared" : ""} ${isVehicle ? "appeared" : ""} ${isVehicleIdle ? "alert" : ""}`;
+    item.className = `event-item ${isAppeared ? "appeared" : ""} ${isLeft ? "left" : ""} ${isAlert || isUnauthorized ? "alert" : ""} ${isFaceEvent || isActionChanged ? "appeared" : ""} ${isVehicle ? "appeared" : ""} ${isVehicleIdle ? "alert" : ""}`;
 
     // Format timestamp
     const ts = parseFloat(evt.timestamp);
@@ -108,7 +109,13 @@ function renderEvent(evt) {
     const displayName = evt.identity_name || evt.person_id;
     const idSuffix = evt.identity_name ? ` (${evt.person_id})` : "";
 
-    if (isVehicle || isVehicleIdle) {
+    if (isUnauthorized) {
+        icon = "🔒";
+        const tgUser = evt.telegram_username ? `@${evt.telegram_username}` : `ID:${evt.telegram_user_id || "?"}`;
+        const attemptedCmd = evt.action || "unknown";
+        title = `Unauthorized Access — ${displayName || tgUser}`;
+        meta = `${time} · ${tgUser} tried ${attemptedCmd} · 🚨 Blocked`;
+    } else if (isVehicle || isVehicleIdle) {
         // Vehicle event — show vehicle-specific icon and info
         const vClass = evt.vehicle_class || "vehicle";
         const vConf = evt.vehicle_confidence ? parseFloat(evt.vehicle_confidence) : 0;

@@ -100,6 +100,23 @@ VEHICLE_SNAPSHOT_KEY = "vehicle_snapshot:{camera_id}:{timestamp}"
 # Consumed by: dashboard (draws bbox on snapshot when served)
 VEHICLE_SNAPSHOT_BBOX_KEY = "vehicle_snapshot:{camera_id}:{timestamp}:bbox"
 
+# Person detection snapshot — JPEG bytes stored per event with 2h TTL
+# Published by: tracker (grabs frame at event emission time)
+# Consumed by: dashboard (event feed + Telegram notification)
+PERSON_SNAPSHOT_KEY = "person_snapshot:{camera_id}:{timestamp}"
+
+# Authorized Telegram bot users — hash of user_id → JSON metadata
+# { "chat_id": "...", "name": "...", "username": "...", "approved_at": "..." }
+# Written by: dashboard (Telegram Access Manager)
+# Read by: bot_commands.py (auth check on every incoming update)
+TELEGRAM_USERS_KEY = "telegram:users"
+
+# Telegram access log — stream of all incoming bot interactions
+# Each entry records user info, action attempted, and whether it was authorized.
+# Written by: bot_commands.py (every incoming update)
+# Read by: dashboard (Telegram Access Manager tab)
+TELEGRAM_ACCESS_LOG = "telegram:access_log"
+
 
 def stream_key(template: str, **kwargs) -> str:
     """Resolve a stream key template with actual values.
@@ -115,10 +132,13 @@ def stream_key(template: str, **kwargs) -> str:
 
 
 # =============================================================================
-# DATA SCHEMAS
+# DATA SCHEMAS (Documentary Reference)
 # =============================================================================
-# These dataclasses define the shape of messages on each stream.
-# Services serialize to/from these when publishing and consuming.
+# These dataclasses document the INTENDED shape of messages on each stream.
+# NOTE: Services use raw dicts with Redis, NOT these dataclasses directly.
+# Some field names may differ from the actual wire format (e.g., FrameMessage
+# uses "frame_bytes" but the Redis field is "frame"). Treat these as schema
+# documentation, not enforced contracts.
 
 @dataclass
 class FrameMessage:

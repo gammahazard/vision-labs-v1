@@ -241,6 +241,18 @@ async function loadNotificationPrefs() {
         if (personToggle) personToggle.checked = cfg.notify_person !== '0';
         if (vehicleToggle) vehicleToggle.checked = cfg.notify_vehicle !== '0';
         if (suppressKnownToggle) suppressKnownToggle.checked = cfg.suppress_known === '1';
+
+        // Set cooldown slider values from config
+        const notifyCooldown = document.getElementById('notifyCooldownSlider');
+        const vehicleCooldown = document.getElementById('vehicleCooldownSlider');
+        if (notifyCooldown && cfg.notify_cooldown) {
+            notifyCooldown.value = cfg.notify_cooldown;
+            document.getElementById('notifyCooldownValue').textContent = cfg.notify_cooldown + 's';
+        }
+        if (vehicleCooldown && cfg.vehicle_cooldown) {
+            vehicleCooldown.value = cfg.vehicle_cooldown;
+            document.getElementById('vehicleCooldownValue').textContent = cfg.vehicle_cooldown + 's';
+        }
     } catch (e) {
         console.debug('Load prefs error:', e);
     }
@@ -269,6 +281,9 @@ function initFeedbackPanel() {
     setInterval(() => {
         loadFeedbackStats();
     }, 30000);
+
+    // Sync notification toggles every 10s (picks up Telegram arm/disarm)
+    setInterval(loadNotificationPrefs, 10000);
 }
 
 

@@ -84,13 +84,9 @@ async def get_vehicle_snapshot(key: str):
     Also draws the bounding box if a companion bbox key exists.
     """
     try:
-        # Use a raw-bytes Redis client (ctx.r has decode_responses=True
+        # Use the shared binary Redis client (ctx.r has decode_responses=True
         # which would corrupt binary JPEG data)
-        r_bin = redis.Redis(
-            host=ctx.r.connection_pool.connection_kwargs.get("host", "127.0.0.1"),
-            port=ctx.r.connection_pool.connection_kwargs.get("port", 6379),
-            decode_responses=False,
-        )
+        r_bin = ctx.r_bin
         data = r_bin.get(key)
         if not data:
             return JSONResponse(status_code=404, content={"error": "Snapshot expired or not found"})
