@@ -7,12 +7,13 @@ PURPOSE:
     external APIs, or performs actions and returns a JSON string result
     that the LLM uses to formulate its response.
 
-TOOLS (19):
+TOOLS (20):
     query_events, query_faces, query_feedback_stats, send_telegram,
     schedule_reminder, get_system_status, retrain_rules, review_feedback,
     get_live_scene, query_unknowns, query_events_by_date, query_zones,
     browse_vehicles, get_weather, query_event_patterns, capture_snapshot,
-    capture_clip, query_notification_history, query_activity_heatmap
+    capture_clip, query_notification_history, query_activity_heatmap,
+    record_verdict
 """
 
 import os
@@ -339,6 +340,32 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_verdict",
+            "description": "Record a verdict (false_alarm or real_threat) for a recent event. Use when the user says something like 'mark that as false alarm' or 'that was real'. Gets the most recent event by default, or a specific one if event_id is provided.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["false_alarm", "real_threat"],
+                        "description": "The verdict to record",
+                    },
+                    "event_id": {
+                        "type": "string",
+                        "description": "Optional: specific event ID. If omitted, uses the most recent event.",
+                    },
+                    "identity_label": {
+                        "type": "string",
+                        "description": "Optional: name/identity for this person (e.g. 'mail carrier', 'neighbor Bob')",
+                    },
+                },
+                "required": ["verdict"],
+            },
+        },
+    },
 ]
 
 
@@ -386,6 +413,8 @@ async def execute_tool(name: str, args: dict) -> str:
             return _tool_query_notification_history(args)
         elif name == "query_activity_heatmap":
             return _tool_query_activity_heatmap(args)
+        elif name == "record_verdict":
+            return _tool_record_verdict(args)
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
@@ -908,17 +937,27 @@ def _tool_query_notification_history(args: dict) -> str:
 async def _tool_query_faces() -> str:
     """Query enrolled faces via the face recognizer API."""
     import httpx
+    from collections import Counter
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{ctx.FACE_API_URL}/api/faces", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
-            # Face-recognizer returns {"faces": [...], "count": N}
             face_list = data.get("faces", data) if isinstance(data, dict) else data
             if not isinstance(face_list, list):
                 face_list = []
-            names = [f.get("name", "unknown") for f in face_list if isinstance(f, dict)]
-            return json.dumps({"enrolled_faces": names, "count": len(names)})
+            # Group by name — each photo angle is a separate DB row
+            name_counts = Counter(
+                f.get("name", "unknown") for f in face_list if isinstance(f, dict)
+            )
+            people = [
+                {"name": name, "photos": count}
+                for name, count in name_counts.most_common()
+            ]
+            return json.dumps({
+                "enrolled_people": len(people),
+                "faces": people,
+            })
         return json.dumps({"error": f"Face API returned {resp.status_code}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -1157,4 +1196,56 @@ def _tool_query_activity_heatmap(args: dict) -> str:
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+def _tool_record_verdict(args: dict) -> str:
+    """Record a verdict for a recent event. Same as Telegram inline buttons."""
+    if not ai_state._feedback_db:
+        return json.dumps({"error": "Feedback database not available"})
+
+    verdict = args.get("verdict", "")
+    if verdict not in ("false_alarm", "real_threat"):
+        return json.dumps({"error": f"Invalid verdict: {verdict}. Must be 'false_alarm' or 'real_threat'"})
+
+    event_id = args.get("event_id", "")
+    identity_label = args.get("identity_label", "")
+
+    try:
+        # If no event_id, get the most recent event
+        if not event_id:
+            entries = ctx.r.xrevrange(ctx.EVENT_STREAM, count=1)
+            if not entries:
+                return json.dumps({"error": "No events found in the stream"})
+            event_id = entries[0][0]
+
+        # Record the verdict
+        ok = ai_state._feedback_db.resolve_pending(
+            event_id=event_id,
+            verdict=verdict,
+            identity_label=identity_label,
+        )
+
+        # Get event details for confirmation
+        event_data = {}
+        try:
+            result = ctx.r.xrange(ctx.EVENT_STREAM, min=event_id, max=event_id)
+            if result:
+                event_data = result[0][1]
+        except Exception:
+            pass
+
+        event_type = event_data.get("event_type", "unknown")
+        identity = event_data.get("identity_name", "")
+
+        return json.dumps({
+            "success": ok,
+            "event_id": event_id,
+            "verdict": verdict,
+            "event_type": event_type,
+            "identity": identity or identity_label or "unknown",
+            "message": f"Verdict '{verdict}' recorded for event {event_id}",
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
 

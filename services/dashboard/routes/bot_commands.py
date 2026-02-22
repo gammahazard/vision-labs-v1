@@ -787,11 +787,13 @@ async def _cmd_faces(chat_id: str = ""):
             await send_text("👤 No faces enrolled yet — use the dashboard to add people.", chat_id=chat_id)
             return
 
-        parts = [f"👤 <b>Enrolled Faces</b> ({len(faces)})\n"]
-        for f in faces:
-            name = f.get("name", "unnamed")
-            photos = f.get("photo_count", f.get("num_photos", "?"))
-            parts.append(f"  • {name} ({photos} photo(s))")
+        # Group by name — each photo angle is a separate DB row
+        from collections import Counter
+        name_counts = Counter(f.get("name", "unnamed") for f in faces)
+
+        parts = [f"👤 <b>Enrolled Faces</b> ({len(name_counts)} people)\n"]
+        for name, count in name_counts.most_common():
+            parts.append(f"  • {name} ({count} photo(s))")
 
         await send_text("\n".join(parts), chat_id=chat_id)
     except Exception as e:
