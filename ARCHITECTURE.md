@@ -1,6 +1,6 @@
 # Vision Labs — Architecture Reference
 
-> **Last updated:** Feb 22, 2026
+> **Last updated:** Feb 23, 2026
 > **Status:** Phases 0–8 complete. 21-tool AI assistant. Telegram Access Manager. Extended bot commands.
 > **Hardware:** RTX 3090 PC, Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
 
@@ -279,11 +279,13 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### vehicle-detector (`services/vehicle-detector/detector.py`)
 
-**~256 lines.** GPU service. Mirrors pose-detector architecture.
+**~270 lines.** GPU service. Mirrors pose-detector architecture.
 
 - **Model:** YOLOv8s (general object detection, auto-downloaded, cached in Docker volume `yolo-models`)
 - **Consumer group:** `vehicle_detectors` — reads from same frame stream as pose-detector
 - **Class filter:** COCO classes 2 (car), 3 (motorcycle), 5 (bus), 7 (truck) — filtered at inference time
+- **Confidence threshold:** 0.5 (env `CONFIDENCE_THRESH`, raised from 0.4 to reduce false positives)
+- **Min bbox area:** 5000 px² (env `MIN_VEHICLE_BBOX_AREA`) — discards tiny reflections/distant objects
 - **Frame skip:** Default 3 (processes every 3rd frame to save GPU for fast-moving vehicles)
 - **Output:** For each vehicle: `{bbox: [x1,y1,x2,y2], confidence: float, class_name: str, class_id: int}`
 - **Snapshot:** Includes raw frame bytes in detection message for tracker to save as vehicle snapshot
@@ -392,7 +394,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `notifications.py` | `GET /api/notifications/status`, `POST /api/notifications/test` | Telegram bot integration + feedback inline buttons |
 | `feedback.py` | `GET /api/feedback`, `GET /api/feedback/stats`, `GET /api/feedback/rules`, `POST /api/feedback/{event_id}`, `POST /api/feedback/rules/{id}/toggle`, `DELETE /api/feedback/rules/{id}` | Self-learning feedback CRUD + suppression rules |
 | `browse.py` | `GET /api/browse/days`, `GET /api/browse/days/{date}`, `GET /api/browse/snapshot/{date}/{filename}`, `GET /api/browse/faces` | Vehicle snapshot browser + enrolled faces gallery |
-| `ai.py` | `GET /api/ai/status`, `GET /api/ai/config`, `POST /api/ai/config`, `POST /api/ai/chat`, `GET /api/ai/history`, `DELETE /api/ai/history`, `POST /api/ai/reset`, `GET /api/ai/reminders`, `GET /api/ai/clip/{filename}` | AI assistant: Ollama chat + 18 tools |
+| `ai.py` | `GET /api/ai/status`, `GET /api/ai/config`, `POST /api/ai/config`, `POST /api/ai/chat`, `GET /api/ai/history`, `DELETE /api/ai/history`, `POST /api/ai/reset`, `GET /api/ai/reminders`, `GET /api/ai/clip/{filename}` | AI assistant: Ollama chat + 18 tools. Uses `think=False` + `keep_alive="30m"` to avoid Qwen3 thinking delay and cold-start. |
 | `ai_tools.py` | (internal, called by `ai.py`) | 18 tool schemas + executor functions (events, faces, unknowns, feedback, retrain, live scene, capture snapshot/clip, weather, patterns, vehicles, zones, notifications, Telegram, reminders, status, review, events by date) |
 | `ai_prompts.py` | (internal, called by `ai.py`) | Dynamic system prompt builder with live system info |
 | `ai_state.py` | (internal) | Per-request media side-channel state (snapshot/clip stash, request UUID) |

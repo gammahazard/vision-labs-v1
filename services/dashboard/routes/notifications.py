@@ -676,7 +676,7 @@ async def notify_vehicle_idle(event_data: dict,
         return 0
 
     now = time.time()
-    if now - _last_vehicle_idle_notification < _get_cooldown("vehicle_cooldown", 120):
+    if now - _last_vehicle_idle_notification < _get_cooldown("vehicle_cooldown", 60):
         return 0  # Rate limited
 
     vehicle_class = event_data.get("vehicle_class", "vehicle")

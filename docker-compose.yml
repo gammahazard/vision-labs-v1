@@ -204,6 +204,8 @@ services:
   # Dashboard routes AI chat requests to http://ollama:11434.
   ollama:
     image: ollama/ollama:latest
+    environment:
+      - OLLAMA_KEEP_ALIVE=30m
     volumes:
       - ollama-models:/root/.ollama
     deploy:

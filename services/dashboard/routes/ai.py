@@ -178,6 +178,8 @@ async def chat(req: ChatRequest):
             messages=messages,
             tools=TOOLS,
             options={"num_ctx": 8192},
+            think=False,
+            keep_alive="30m",
         )
 
         # Handle tool calls if any
@@ -205,6 +207,8 @@ async def chat(req: ChatRequest):
                 messages=messages,
                 tools=TOOLS,
                 options={"num_ctx": 8192},
+                think=False,
+                keep_alive="30m",
             )
 
         # Extract final response text

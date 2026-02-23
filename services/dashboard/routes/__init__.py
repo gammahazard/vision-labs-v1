@@ -51,5 +51,5 @@ DEFAULT_CONFIG = {
     "notify_vehicle": "1",
     "suppress_known": "0",
     "notify_cooldown": "60",
-    "vehicle_cooldown": "120",
+    "vehicle_cooldown": "60",
 }

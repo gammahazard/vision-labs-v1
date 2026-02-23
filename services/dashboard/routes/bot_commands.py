@@ -1068,6 +1068,8 @@ async def _cmd_ask(chat_id: str = "", text: str = ""):
                 messages=messages,
                 tools=TOOLS,
                 options={"num_ctx": 8192},
+                think=False,
+                keep_alive="30m",
             ),
         )
 
@@ -1092,6 +1094,8 @@ async def _cmd_ask(chat_id: str = "", text: str = ""):
                     messages=messages,
                     tools=TOOLS,
                     options={"num_ctx": 8192},
+                    think=False,
+                    keep_alive="30m",
                 ),
             )
 

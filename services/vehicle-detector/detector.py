@@ -56,7 +56,7 @@ CAMERA_ID = os.getenv("CAMERA_ID", "front_door")
 REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 MODEL_NAME = os.getenv("MODEL_NAME", "yolov8s.pt")
-CONFIDENCE_THRESH = float(os.getenv("CONFIDENCE_THRESH", "0.4"))
+CONFIDENCE_THRESH = float(os.getenv("CONFIDENCE_THRESH", "0.5"))
 FRAME_SKIP = int(os.getenv("FRAME_SKIP", "3"))
 CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "vehicle_detectors")
 CONSUMER_NAME = os.getenv("CONSUMER_NAME", "vdetector_1")
@@ -73,6 +73,12 @@ MAX_DETECTION_STREAM_LEN = 1000
 # 2=car, 3=motorcycle, 5=bus, 7=truck
 VEHICLE_CLASSES = [2, 3, 5, 7]
 VEHICLE_CLASS_NAMES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
+
+# Minimum bounding box area (pixels²) to accept a vehicle detection.
+# Filters out tiny phantom detections from lights, reflections, distant noise.
+# A real car at ~50px wide × 40px tall = 2000px²; this threshold requires
+# at least ~70×70 px which is a reasonable vehicle at moderate distance.
+MIN_VEHICLE_BBOX_AREA = int(os.getenv("MIN_VEHICLE_BBOX_AREA", "5000"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -241,6 +247,13 @@ def run():
                             conf = float(boxes.conf[i].cpu().numpy())
                             cls_id = int(boxes.cls[i].cpu().numpy())
                             class_name = VEHICLE_CLASS_NAMES.get(cls_id, f"vehicle_{cls_id}")
+
+                            # Skip tiny detections — filters phantom
+                            # hits from lights, reflections, and
+                            # distant noise that YOLO misclassifies.
+                            bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                            if bbox_area < MIN_VEHICLE_BBOX_AREA:
+                                continue
 
                             detections.append({
                                 "bbox": [round(c, 1) for c in bbox],
