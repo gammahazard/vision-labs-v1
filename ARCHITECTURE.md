@@ -394,8 +394,8 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `notifications.py` | `GET /api/notifications/status`, `POST /api/notifications/test` | Telegram bot integration + feedback inline buttons |
 | `feedback.py` | `GET /api/feedback`, `GET /api/feedback/stats`, `GET /api/feedback/rules`, `POST /api/feedback/{event_id}`, `POST /api/feedback/rules/{id}/toggle`, `DELETE /api/feedback/rules/{id}` | Self-learning feedback CRUD + suppression rules |
 | `browse.py` | `GET /api/browse/days`, `GET /api/browse/days/{date}`, `GET /api/browse/snapshot/{date}/{filename}`, `GET /api/browse/faces` | Vehicle snapshot browser + enrolled faces gallery |
-| `ai.py` | `GET /api/ai/status`, `GET /api/ai/config`, `POST /api/ai/config`, `POST /api/ai/chat`, `GET /api/ai/history`, `DELETE /api/ai/history`, `POST /api/ai/reset`, `GET /api/ai/reminders`, `GET /api/ai/clip/{filename}` | AI assistant: Ollama chat + 18 tools. Uses `think=False` + `keep_alive="30m"` to avoid Qwen3 thinking delay and cold-start. |
-| `ai_tools.py` | (internal, called by `ai.py`) | 18 tool schemas + executor functions (events, faces, unknowns, feedback, retrain, live scene, capture snapshot/clip, weather, patterns, vehicles, zones, notifications, Telegram, reminders, status, review, events by date) |
+| `ai.py` | `GET /api/ai/status`, `GET /api/ai/config`, `POST /api/ai/config`, `POST /api/ai/chat`, `GET /api/ai/history`, `DELETE /api/ai/history`, `POST /api/ai/reset`, `GET /api/ai/reminders`, `GET /api/ai/clip/{filename}` | AI assistant: Ollama chat + 21 tools. Uses `think=False` + `keep_alive="4h"` to avoid Qwen3 thinking delay and cold-start. Dashboard startup fires a warmup request to pre-load the model into GPU memory. |
+| `ai_tools.py` | (internal, called by `ai.py`) | 21 tool schemas + executor functions (events, events by date, patterns, activity heatmap, faces, unknowns, show faces, feedback, retrain, record verdict, live scene, capture snapshot/clip, weather, vehicles, zones, notifications, Telegram, reminders, status, review) |
 | `ai_prompts.py` | (internal, called by `ai.py`) | Dynamic system prompt builder with live system info |
 | `ai_state.py` | (internal) | Per-request media side-channel state (snapshot/clip stash, request UUID) |
 | `bot_commands.py` | (internal, background task) | Telegram bot polling loop + command handlers (/snapshot, /clip, /status, /ask, /arm, /disarm, /who, /events, /help) |
@@ -595,7 +595,7 @@ All tests in `tests/`. Run with: `pytest tests/ -v`
 | **6.1: Auth** | ✅ Complete | Login page, cookie sessions, change password |
 | **6.2: Vehicles** | ✅ Complete | YOLOv8s vehicle detection, snapshots, idle alerts, live overlay bboxes |
 | **6.5: Self-Learning** | ✅ Complete | Feedback DB, Telegram inline buttons, suppression rules, review queue, dashboard widget |
-| **7: AI Assistant** | ✅ Complete | Ollama + Qwen 3 14B, onboarding wizard, chat UI, 18 tools (query events/faces/unknowns/feedback/patterns, live scene, capture snapshot with weather+scene description, capture 5-second video clip in chat, weather, browse vehicles/zones/notification history, retrain rules, send Telegram, schedule reminders, system status) |
+| **7: AI Assistant** | ✅ Complete | Ollama + Qwen 3 14B, onboarding wizard, chat UI, 21 tools (query events/faces/unknowns/feedback/patterns, live scene, capture snapshot with weather+scene description, capture 5-second video clip in chat, weather, browse vehicles/zones/notification history, retrain rules, send Telegram, schedule reminders, system status, activity heatmap, record verdict, show faces) |
 | **7.5: Telegram Access Manager** | ✅ Complete | Web-based user management page. Approve/revoke Telegram users, view access log. Unauthorized bot access emits `unauthorized_access` events to event stream |
 
 **Minor remaining from Phase 6:** Event clip recording (10s clips around detections, saved to QNAP via FTP/NFS).
