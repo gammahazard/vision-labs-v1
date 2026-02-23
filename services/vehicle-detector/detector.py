@@ -76,9 +76,9 @@ VEHICLE_CLASS_NAMES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
 # Minimum bounding box area (pixels²) to accept a vehicle detection.
 # Filters out tiny phantom detections from lights, reflections, distant noise.
-# A real car at ~50px wide × 40px tall = 2000px²; this threshold requires
-# at least ~70×70 px which is a reasonable vehicle at moderate distance.
-MIN_VEHICLE_BBOX_AREA = int(os.getenv("MIN_VEHICLE_BBOX_AREA", "5000"))
+# A real vehicle at ~50px wide × 50px tall = 2500px²; this threshold filters
+# anything smaller while still catching vehicles at moderate distance.
+MIN_VEHICLE_BBOX_AREA = int(os.getenv("MIN_VEHICLE_BBOX_AREA", "2500"))
 
 # ---------------------------------------------------------------------------
 # Logging
