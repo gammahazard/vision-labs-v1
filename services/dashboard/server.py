@@ -425,7 +425,7 @@ async def _event_notification_poller():
     # Ensure snapshot directory exists
     SNAPSHOT_DIR = os.path.join(os.environ.get("SNAPSHOT_DIR", "/data/snapshots"))
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    SNAPSHOT_MAX_AGE = 7200  # 2 hours
+    # Snapshots persist indefinitely (will move to NAS for long-term storage)
 
     last_id = "$"  # Only process new events from this point forward
     logger.info(f"Event poller started — snapshots → {SNAPSHOT_DIR}, vehicles → {VEHICLE_SNAPSHOT_DIR}")
@@ -510,16 +510,8 @@ async def _event_notification_poller():
             logger.debug(f"Snapshot save failed for {event_id}: {e}")
             return None
 
-    def _cleanup_old_snapshots():
-        """Remove snapshots older than SNAPSHOT_MAX_AGE."""
-        try:
-            now = time.time()
-            for fname in os.listdir(SNAPSHOT_DIR):
-                fpath = os.path.join(SNAPSHOT_DIR, fname)
-                if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > SNAPSHOT_MAX_AGE:
-                    os.remove(fpath)
-        except Exception:
-            pass
+    # Snapshot cleanup removed — snapshots now persist indefinitely
+    # (will be managed by NAS retention policy when QNAP is connected)
 
     def _save_vehicle_snapshot(snapshot_key: str, event_data: dict):
         """
@@ -655,11 +647,7 @@ async def _event_notification_poller():
                                     snapshot_bytes=snap_bytes,
                                 )
 
-            # Periodic cleanup every ~100 iterations (~200s)
-            cleanup_counter += 1
-            if cleanup_counter >= 100:
-                cleanup_counter = 0
-                await loop.run_in_executor(None, _cleanup_old_snapshots)
+            # (Snapshot cleanup removed — snapshots persist indefinitely)
 
         except Exception as e:
             logger.warning(f"Event notification poller error: {e}")
