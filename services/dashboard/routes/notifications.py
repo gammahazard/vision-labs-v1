@@ -500,10 +500,27 @@ def build_clip(duration: float = 5.0, fps: int = 10) -> bytes | None:
             writer.write(f)
         writer.release()
 
+        # Re-encode to H.264 for Telegram/browser compatibility
+        # OpenCV's mp4v (MPEG-4 Part 2) won't play inline in Telegram
         import os
-        with open(tmp_path, "rb") as f:
-            video_bytes = f.read()
-        os.unlink(tmp_path)
+        import subprocess
+        h264_path = tmp_path + ".h264.mp4"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", tmp_path,
+                 "-c:v", "libx264", "-preset", "ultrafast",
+                 "-movflags", "+faststart", "-an", h264_path],
+                capture_output=True, timeout=30,
+            )
+            os.unlink(tmp_path)
+            with open(h264_path, "rb") as f:
+                video_bytes = f.read()
+            os.unlink(h264_path)
+        except Exception as e:
+            logger.warning(f"build_clip: ffmpeg re-encode failed ({e}), using raw mp4v")
+            with open(tmp_path, "rb") as f:
+                video_bytes = f.read()
+            os.unlink(tmp_path)
 
         if len(video_bytes) < 1000:
             logger.warning(f"build_clip: video too small ({len(video_bytes)} bytes)")
