@@ -171,3 +171,36 @@ async function _browseFacesClick() {
 function _browseBackHome() {
     _loadBrowseHome();
 }
+
+// ---------------------------------------------------------------------------
+// Auto-refresh — poll every 30s while the browse panel is open
+// ---------------------------------------------------------------------------
+setInterval(() => {
+    const panel = document.getElementById("browsePanel");
+    if (!panel || panel.classList.contains("collapsed")) return;
+
+    // Refresh whichever view is currently active
+    if (_browseCurrentView === "home") {
+        _loadBrowseHome();
+    } else if (_browseCurrentView === "day" && _browseCurrentDate) {
+        _browseDayClick(_browseCurrentDate);
+    }
+    // Don't auto-refresh faces gallery (rarely changes)
+}, 30000);
+
+// Also refresh immediately when the panel is opened (uncollapsed)
+document.addEventListener("DOMContentLoaded", () => {
+    const panel = document.getElementById("browsePanel");
+    if (!panel) return;
+    const observer = new MutationObserver(() => {
+        if (!panel.classList.contains("collapsed")) {
+            // Panel just opened — refresh immediately
+            if (_browseCurrentView === "home") {
+                _loadBrowseHome();
+            } else if (_browseCurrentView === "day" && _browseCurrentDate) {
+                _browseDayClick(_browseCurrentDate);
+            }
+        }
+    });
+    observer.observe(panel, { attributes: true, attributeFilter: ["class"] });
+});
