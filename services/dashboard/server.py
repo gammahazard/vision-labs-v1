@@ -374,6 +374,8 @@ async def _ensure_ollama_model():
                 model=model,
                 messages=[{"role": "user", "content": "The system just restarted. Confirm you are loaded and ready in one short sentence."}],
                 options={"num_predict": 30, "num_ctx": 8192},
+                think=False,
+                keep_alive="4h",
             ))
             # ollama library returns objects, not dicts
             reply = getattr(resp.message, "content", "") or "Model loaded and ready."

@@ -205,7 +205,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     environment:
-      - OLLAMA_KEEP_ALIVE=30m
+      - OLLAMA_KEEP_ALIVE=4h
     volumes:
       - ollama-models:/root/.ollama
     deploy:

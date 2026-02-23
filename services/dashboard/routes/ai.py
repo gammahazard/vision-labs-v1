@@ -208,7 +208,7 @@ async def chat(req: ChatRequest):
                 tools=TOOLS,
                 options={"num_ctx": 8192},
                 think=False,
-                keep_alive="30m",
+                keep_alive="4h",
             )
 
         # Extract final response text
