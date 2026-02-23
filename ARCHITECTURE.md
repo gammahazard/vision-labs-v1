@@ -816,13 +816,14 @@ vision-labsv1/
 │           ├── feedback.js       # Feedback review queue (~374 lines)
 │           └── telegram_access.js # Telegram Access Manager UI (~223 lines)
 │
-└── tests/
-    ├── test_actions.py           # Action classifier tests
-    ├── test_time_rules.py        # Time rules + PIP tests
-    ├── test_face_db.py           # Face DB integration tests
-    ├── test_feedback_db.py       # Feedback + suppression tests
-    ├── test_tracker.py           # Tracker algorithm tests
-    ├── test_routes.py            # Dashboard API endpoint tests
-    └── test_vehicles.py          # Vehicle pipeline tests
+└── tests/                            # 227 tests — run: python -m pytest tests/ -v
+    ├── test_actions.py           # Action classifier (21 tests — standing, arms, lying, crouch, edge cases)
+    ├── test_time_rules.py        # Time rules + PIP geometry (21 tests — zones, sun times, alert logic)
+    ├── test_face_db.py           # Face DB lifecycle (26 tests — enroll, match, unknown, label, auto-clear)
+    ├── test_feedback_db.py       # Feedback + suppression (16 tests — CRUD, rules, pending events)
+    ├── test_tracker.py           # Tracker algorithms (15 tests — IoU, person state, direction)
+    ├── test_routes.py            # Dashboard API routes (25 tests — config, events, auth, notifications)
+    ├── test_vehicles.py          # Vehicle pipeline (29 tests — events, browse, idle, stationarity)
+    └── test_notifications.py     # Notification logic (17 tests — duration, bbox selection, rate-limit)
 ```
 

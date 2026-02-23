@@ -179,7 +179,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - MODEL_NAME=/models/yolov8s.pt
-      - CONFIDENCE_THRESH=0.4
+      - CONFIDENCE_THRESH=0.35
       - FRAME_SKIP=1
     volumes:
       - ./contracts:/app/contracts:ro

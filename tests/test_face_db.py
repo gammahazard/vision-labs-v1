@@ -377,3 +377,57 @@ class TestPersistence:
         result = db2.match(emb.copy())
         assert result is not None
         assert result["name"] == "Alice"
+
+
+# ---------------------------------------------------------------------------
+# Retroactive match & clear unknowns (face labeling auto-clear)
+# ---------------------------------------------------------------------------
+
+class TestMatchAndClearUnknowns:
+    """Tests for FaceDB.match_and_clear_unknowns — retroactive clearing of
+    unknown faces that match a newly enrolled/labeled face."""
+
+    def test_clears_matching_unknowns(self, db):
+        """Enrolling a face should clear unknowns with similar embeddings."""
+        emb = random_embedding(seed=42)
+        # Save one unknown with a similar embedding
+        np.random.seed(100)
+        uid1 = db.save_unknown(similar_embedding(emb, noise=0.02), b"photo1")
+        assert uid1 is not None
+        assert db.unknown_count == 1
+
+        # Now retroactively clear unknowns matching this embedding
+        cleared = db.match_and_clear_unknowns("Alice", emb.copy())
+        assert cleared == 1
+        assert db.unknown_count == 0
+
+    def test_keeps_different_unknowns(self, db):
+        """Unknowns with very different embeddings should NOT be cleared."""
+        emb = random_embedding(seed=42)
+        # Save a similar unknown and a completely different one
+        db.save_unknown(similar_embedding(emb, noise=0.01), b"photo1")
+        db.save_unknown(random_embedding(seed=999), b"photo2")
+        assert db.unknown_count == 2
+
+        cleared = db.match_and_clear_unknowns("Alice", emb.copy())
+        assert cleared == 1  # Only the similar one
+        assert db.unknown_count == 1  # Different one still there
+
+    def test_returns_zero_when_no_matches(self, db):
+        """No matching unknowns → returns 0, no crash."""
+        # Save unknowns with completely different embeddings
+        db.save_unknown(random_embedding(seed=1), b"photo1")
+        db.save_unknown(random_embedding(seed=2), b"photo2")
+        assert db.unknown_count == 2
+
+        # Try to clear with an unrelated embedding
+        cleared = db.match_and_clear_unknowns("Alice", random_embedding(seed=999))
+        assert cleared == 0
+        assert db.unknown_count == 2  # Nothing removed
+
+    def test_returns_zero_with_no_unknowns(self, db):
+        """Empty unknowns cache → returns 0, no crash."""
+        assert db.unknown_count == 0
+        cleared = db.match_and_clear_unknowns("Alice", random_embedding(seed=1))
+        assert cleared == 0
+

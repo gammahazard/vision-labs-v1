@@ -487,21 +487,28 @@ class TestTrackerVehicleEvent:
         assert data["snapshot_key"] == ""
 
     # -----------------------------------------------------------------------
-    # Vehicle idle detection tests
+    # Helper: feed stationary detections to build center_history ≥ 5
+    # -----------------------------------------------------------------------
+    def _feed_stationary(self, tracker, det, t_start, n_frames=6, jpeg=None):
+        """Feed the same bbox n_frames times, 1s apart, to fill center_history."""
+        for i in range(n_frames):
+            tracker._process_vehicle_detections(det, t_start + i, jpeg)
+
+    # -----------------------------------------------------------------------
+    # Vehicle idle detection tests (updated for 90s timeout + stationarity)
     # -----------------------------------------------------------------------
     def test_vehicle_idle_fires_after_timeout(self, tracker_instance):
-        """vehicle_idle event fires when same vehicle seen for > VEHICLE_IDLE_TIMEOUT."""
+        """vehicle_idle fires when stationary for ≥ VEHICLE_IDLE_TIMEOUT (90s)."""
         tracker, r = tracker_instance
 
         det = [{"bbox": [100, 200, 300, 400], "class_name": "car", "confidence": 0.9}]
         jpeg = b"\xff\xd8\xff\xe0snapshot"
 
-        # First detection at t=0 → vehicle_detected
-        tracker._process_vehicle_detections(det, 1708000000.0, jpeg)
-        # Same position at t=2 → too early for idle
-        tracker._process_vehicle_detections(det, 1708000002.0, jpeg)
-        # Same position at t=6 → past 5s idle timeout → vehicle_idle
-        tracker._process_vehicle_detections(det, 1708000006.0, jpeg)
+        # Feed 6 frames at same position to satisfy is_stationary (needs ≥5)
+        self._feed_stationary(tracker, det, 1708000000.0, n_frames=6, jpeg=jpeg)
+
+        # Jump to t=91s — past 90s idle timeout → vehicle_idle
+        tracker._process_vehicle_detections(det, 1708000091.0, jpeg)
 
         events = self._get_events(r)
         event_types = [e["event_type"] for _, e in events]
@@ -513,19 +520,18 @@ class TestTrackerVehicleEvent:
         idle_events = [(_, e) for _, e in events if e["event_type"] == "vehicle_idle"]
         assert len(idle_events) == 1
         _, idle_data = idle_events[0]
-        assert float(idle_data["duration"]) >= 5.0
+        assert float(idle_data["duration"]) >= 90.0
         assert idle_data["vehicle_class"] == "car"
 
     def test_vehicle_idle_not_before_timeout(self, tracker_instance):
-        """vehicle_idle does NOT fire when vehicle seen for < VEHICLE_IDLE_TIMEOUT."""
+        """vehicle_idle does NOT fire before VEHICLE_IDLE_TIMEOUT (90s)."""
         tracker, r = tracker_instance
 
         det = [{"bbox": [100, 200, 300, 400], "class_name": "truck", "confidence": 0.8}]
 
-        # First detection at t=0
-        tracker._process_vehicle_detections(det, 1708000000.0)
-        # Same position at t=3 → NOT past 5s threshold
-        tracker._process_vehicle_detections(det, 1708000003.0)
+        # Feed frames up to t=60s — not past 90s threshold
+        self._feed_stationary(tracker, det, 1708000000.0, n_frames=6)
+        tracker._process_vehicle_detections(det, 1708000060.0)
 
         events = self._get_events(r)
         event_types = [e["event_type"] for _, e in events]
@@ -541,12 +547,12 @@ class TestTrackerVehicleEvent:
             {"bbox": [400, 100, 550, 250], "class_name": "truck", "confidence": 0.85},
         ]
 
-        # t=0 — both appear
-        tracker._process_vehicle_detections(det_both, 1708000000.0)
+        # Feed 6 frames to build center_history for both
+        self._feed_stationary(tracker, det_both, 1708000000.0, n_frames=6)
         assert len(tracker.tracked_vehicles) == 2
 
-        # t=6 — both still there, both should idle
-        tracker._process_vehicle_detections(det_both, 1708000006.0)
+        # t=91s — both still there, both should idle
+        tracker._process_vehicle_detections(det_both, 1708000091.0)
 
         events = self._get_events(r)
         idle_events = [e for _, e in events if e["event_type"] == "vehicle_idle"]
@@ -570,4 +576,129 @@ class TestTrackerVehicleEvent:
         assert len(tracker.tracked_vehicles) == 1
         remaining = list(tracker.tracked_vehicles.values())[0]
         assert remaining.class_name == "bus"
+
+
+# ===========================================================================
+# TrackedVehicle — is_stationary, center_history, snapshot_bbox
+# ===========================================================================
+class TestTrackedVehicleStationary:
+    """Unit tests for TrackedVehicle.is_stationary and related state."""
+
+    def _make_vehicle(self, bbox=None, timestamp=0.0):
+        """Create a TrackedVehicle with default values."""
+        from tracker import TrackedVehicle
+        bbox = bbox or [100, 200, 300, 400]
+        return TrackedVehicle(
+            vehicle_id="v0001",
+            bbox=bbox,
+            class_name="car",
+            confidence=0.9,
+            timestamp=timestamp,
+        )
+
+    def test_stationary_when_not_moving(self):
+        """Vehicle at the same position for 10 frames → is_stationary == True."""
+        veh = self._make_vehicle()
+        # Feed same bbox 9 more times (1 from __init__ + 9 = 10 total)
+        for i in range(1, 10):
+            veh.update([100, 200, 300, 400], 0.9, float(i))
+        assert len(veh.center_history) == 10
+        assert veh.is_stationary is True
+
+    def test_not_stationary_when_moving(self):
+        """Vehicle shifting 50px per frame → is_stationary == False."""
+        veh = self._make_vehicle()
+        for i in range(1, 10):
+            # Shift x1,x2 by 50px each frame
+            shifted_bbox = [100 + i * 50, 200, 300 + i * 50, 400]
+            veh.update(shifted_bbox, 0.9, float(i))
+        assert veh.is_stationary is False
+
+    def test_not_stationary_with_few_frames(self):
+        """< 5 frames → always False (not enough data)."""
+        veh = self._make_vehicle()
+        # Only 1 center from __init__, add 2 more = 3 total
+        veh.update([100, 200, 300, 400], 0.9, 1.0)
+        veh.update([100, 200, 300, 400], 0.9, 2.0)
+        assert len(veh.center_history) == 3
+        assert veh.is_stationary is False
+
+    def test_stationary_at_exactly_5_frames(self):
+        """Exactly 5 frames at same position → is_stationary == True."""
+        veh = self._make_vehicle()
+        for i in range(1, 5):  # 1 from init + 4 = 5 total
+            veh.update([100, 200, 300, 400], 0.9, float(i))
+        assert len(veh.center_history) == 5
+        assert veh.is_stationary is True
+
+    def test_center_history_capped_at_20(self):
+        """After 25 updates, center_history should be capped at 20."""
+        veh = self._make_vehicle()
+        for i in range(1, 26):  # 1 from init + 25 = 26 attempts
+            veh.update([100, 200, 300, 400], 0.9, float(i))
+        assert len(veh.center_history) == 20
+
+    def test_stationary_boundary_29px_is_stationary(self):
+        """Center drift of exactly 29px → is_stationary == True (< 30px)."""
+        veh = self._make_vehicle(bbox=[100, 200, 300, 400])
+        # Center starts at (200, 300). Shift bbox so center drifts by 29px
+        # horizontally: new center = (229, 300) → drift = 29px
+        for i in range(1, 6):
+            veh.update([100, 200, 300, 400], 0.9, float(i))
+        # Final frame: shift center by 29px
+        veh.update([129, 200, 329, 400], 0.9, 6.0)
+        assert veh.is_stationary is True
+
+    def test_stationary_boundary_31px_is_not_stationary(self):
+        """Center drift of 31px → is_stationary == False (>= 30px)."""
+        veh = self._make_vehicle(bbox=[100, 200, 300, 400])
+        for i in range(1, 6):
+            veh.update([100, 200, 300, 400], 0.9, float(i))
+        # Final frame: shift center by 31px
+        veh.update([131, 200, 331, 400], 0.9, 6.0)
+        assert veh.is_stationary is False
+
+    def test_snapshot_bbox_preserved_after_update(self):
+        """snapshot_bbox should stay at initial bbox even after updates."""
+        veh = self._make_vehicle(bbox=[100, 200, 300, 400])
+        # snapshot_bbox is set to initial bbox
+        assert veh.snapshot_bbox == [100, 200, 300, 400]
+        # Update with different bbox
+        veh.update([110, 210, 310, 410], 0.9, 1.0)
+        # snapshot_bbox should not change from update()
+        assert veh.snapshot_bbox == [100, 200, 300, 400]
+        # bbox should be the latest
+        assert veh.bbox == [110, 210, 310, 410]
+
+    def test_idle_requires_stationary(self, fake_redis):
+        """Vehicle tracked > 90s but moving → no vehicle_idle event."""
+        from tracker import PersonTracker
+
+        class BytesFakeRedis(FakeRedis):
+            def xadd(self, name, fields, **kwargs):
+                if name not in self._streams:
+                    self._streams[name] = []
+                sid = f"{int(time.time() * 1000)}-{len(self._streams[name])}"
+                self._streams[name].append((sid, fields))
+                return sid
+
+        bfr = BytesFakeRedis()
+        tracker = PersonTracker(bfr, iou_threshold=0.3, lost_timeout=5.0)
+
+        # Moving vehicle: shift 50px every frame so is_stationary == False
+        for i in range(7):
+            det = [{"bbox": [100 + i * 50, 200, 300 + i * 50, 400],
+                    "class_name": "car", "confidence": 0.9}]
+            tracker._process_vehicle_detections(det, 1708000000.0 + i * 2)
+
+        # Jump to t=91s — past timeout but vehicle was moving
+        det_final = [{"bbox": [100 + 7 * 50, 200, 300 + 7 * 50, 400],
+                      "class_name": "car", "confidence": 0.9}]
+        tracker._process_vehicle_detections(det_final, 1708000091.0)
+
+        from streams import EVENT_STREAM, stream_key
+        event_key = stream_key(EVENT_STREAM, camera_id="front_door")
+        events = bfr._streams.get(event_key, [])
+        event_types = [e["event_type"] for _, e in events]
+        assert "vehicle_idle" not in event_types  # Moving → no idle
 
