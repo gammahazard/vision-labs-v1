@@ -202,9 +202,10 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 2. dashboard background poller (_event_notification_poller):
    - XREAD events stream (blocking, in threadpool executor)
    - ALWAYS on person_appeared/person_identified/vehicle_detected/vehicle_idle: save snapshot JPEG to /data/snapshots/{event_id}.jpg
-   - If Telegram configured + person_appeared: rate-limited (1 per 60s), send Telegram photo with feedback buttons
+   - Snapshot bbox alignment: uses `snapshot_bbox` from event (matches saved frame) instead of live `bbox` to prevent mismatch
+   - If Telegram configured + person_appeared: rate-limited (1 per 60s, with debug logging when skipped), send Telegram photo with bbox + feedback buttons
    - If Telegram configured + person_identified + suppress_known OFF: send Telegram photo (not rate-limited)
-   - If Telegram configured + vehicle_idle: rate-limited (1 per 60s), send Telegram photo
+   - If Telegram configured + vehicle_idle: rate-limited (1 per 60s, with debug logging), send Telegram photo with bbox (no follow-up clip)
    - Old snapshots auto-cleaned every ~200s (files older than 2 hours)
 3. Dashboard frontend shows snapshot thumbnails in the event feed
 4. Telegram receives photo + HTML-formatted caption (when configured)
@@ -294,7 +295,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### tracker (`services/tracker/tracker.py`)
 
-**~928 lines.** CPU-only, most complex service.
+**~955 lines.** CPU-only, most complex service.
 
 **Core algorithm:**
 - Maintains a dict of `TrackedPerson` objects, each with: person_id, bbox, first_seen, last_seen, action, action_history, confirmed (bool)
@@ -319,6 +320,20 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - Matches face-recognizer identity bboxes to tracked persons via IoU
 - Once matched: emits `person_identified` event (fires only once per person per identity assignment)
 - Identity name propagated to all subsequent events for that person
+
+**Vehicle tracking:**
+- Reads from `detections:vehicle:{camera_id}` stream (separate from person detections)
+- IoU matching (threshold 0.2) against tracked vehicles: `TrackedVehicle` objects track bbox, class_name, first_seen, duration
+- **Idle detection:** Vehicle must be (a) tracked for ≥90 seconds (`VEHICLE_IDLE_TIMEOUT`) AND (b) stationary (bbox center drift <30px across last 20 frames). Passing vehicles that move through the frame never trigger idle.
+- `center_history`: each TrackedVehicle records its center position every frame (ring buffer of 20); `is_stationary` checks max displacement from first center
+- Snapshot saved at first detection (frame + bbox stored in Redis with 24h TTL)
+- Events: `vehicle_detected` (rate-limited 1 per 3s), `vehicle_idle` (once per vehicle, only if stationary)
+- Stale vehicles pruned after `VEHICLE_LOST_TIMEOUT` (10s) of not being seen
+
+**Snapshot bbox alignment:**
+- For person events (`person_appeared`, `person_identified`): the tracker saves the HD frame AND the corresponding bbox as a companion Redis key (`{snap_key}:bbox`)
+- The event includes `snapshot_bbox` — the bbox that matches the saved snapshot frame
+- The dashboard uses `snapshot_bbox` (not the live `bbox`) when drawing annotations, preventing bbox/frame timing mismatches
 
 **Hot-reload config:**
 - Reads `iou_threshold`, `lost_timeout` from Redis config every 10 messages
@@ -360,7 +375,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### Backend (`services/dashboard/server.py`)
 
-**~1077 lines.** FastAPI with modular routes.
+**~1078 lines.** FastAPI with modular routes.
 
 **Startup sequence:**
 1. Initialize auth SQLite database (create default admin/admin if empty)
@@ -507,13 +522,13 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 
 | Event | Trigger | Rate Limited? | Photo Source |
 |-------|---------|---------------|--------------|
-| Person detected | `person_appeared` event | Yes (1 per 60s) | HD frame (fallback: sub-stream) + bbox highlight |
-| Person identified | `person_identified` event | No (always important) | HD frame (fallback: sub-stream) + bbox highlight |
-| Vehicle idle | `vehicle_idle` event | Yes (1 per 60s) | HD frame (fallback: sub-stream) |
+| Person detected | `person_appeared` event | Yes (1 per 60s, logged when skipped) | HD frame (fallback: sub-stream) + `snapshot_bbox` highlight |
+| Person identified | `person_identified` event | No (always important) | HD frame (fallback: sub-stream) + `snapshot_bbox` highlight |
+| Vehicle idle | `vehicle_idle` event | Yes (1 per 60s, logged when skipped) | HD frame (fallback: sub-stream) + bbox highlight, duration formatted as human-readable (e.g. "20 min") |
 | Face enrolled | Enrollment API success | No | Face thumbnail from face-recognizer |
 | Test notification | Manual button click | No | HD frame (fallback: sub-stream) |
 
-`get_latest_frame()` tries `frame_hd:{camera_id}` first for higher resolution, falling back to the sub-stream. `draw_bbox_on_frame()` scales bbox coordinates from sub-stream pixels to HD resolution when the HD frame is used.
+`get_latest_frame()` tries `frame_hd:{camera_id}` first for higher resolution, falling back to the sub-stream. `draw_bbox_on_frame()` scales bbox coordinates from sub-stream pixels to HD resolution when the HD frame is used. The dashboard uses `snapshot_bbox` (saved at event emission time) instead of the live `bbox` to ensure the annotation matches the saved frame.
 
 **Architecture:** The dashboard runs a background `asyncio` task (`_event_notification_poller`) that does `XREAD` on the event stream in a thread executor (to avoid blocking the event loop). For every `person_appeared` event, it saves a camera snapshot to `/data/snapshots/` (used by the event feed thumbnails). When Telegram is configured and relevant events fire, it calls `send_photo()` which POSTs to Telegram's `sendPhoto` endpoint.
 
@@ -773,7 +788,7 @@ vision-labsv1/
 │       │   ├── faces.py          # Face enrollment proxy (~108 lines)
 │       │   ├── unknowns.py       # Unknown faces proxy (~160 lines)
 │       │   ├── zones.py          # Zone CRUD API (~110 lines)
-│       │   ├── notifications.py  # Telegram integration (~815 lines)
+│       │   ├── notifications.py  # Telegram integration (~855 lines)
 │       │   ├── feedback.py       # Feedback + suppression rules API (~123 lines)
 │       │   ├── browse.py         # Vehicle snapshot browser + faces gallery (~158 lines)
 │       │   ├── ai.py             # AI assistant chat endpoint (~313 lines)

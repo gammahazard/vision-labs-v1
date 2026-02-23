@@ -556,7 +556,10 @@ async def notify_person_detected(event_data: dict,
         return 0
 
     now = time.time()
-    if now - _last_person_notification < _get_cooldown("notify_cooldown", 60):
+    cooldown = _get_cooldown("notify_cooldown", 60)
+    if now - _last_person_notification < cooldown:
+        remaining = cooldown - (now - _last_person_notification)
+        logger.debug(f"Person notification rate-limited ({remaining:.0f}s remaining in {cooldown}s cooldown)")
         return 0  # Rate limited
 
     # Check suppression BEFORE updating the rate-limit timer.
@@ -716,13 +719,16 @@ async def notify_vehicle_idle(event_data: dict,
         return 0
 
     now = time.time()
-    if now - _last_vehicle_idle_notification < _get_cooldown("vehicle_cooldown", 60):
+    cooldown = _get_cooldown("vehicle_cooldown", 60)
+    if now - _last_vehicle_idle_notification < cooldown:
+        remaining = cooldown - (now - _last_vehicle_idle_notification)
+        logger.debug(f"Vehicle idle notification rate-limited ({remaining:.0f}s remaining in {cooldown}s cooldown)")
         return 0  # Rate limited
 
     vehicle_class = event_data.get("vehicle_class", "vehicle")
     zone = event_data.get("zone", "")
     time_period = event_data.get("time_period", "")
-    duration = event_data.get("duration", "0")
+    duration_raw = float(event_data.get("duration", "0") or "0")
     confidence = event_data.get("vehicle_confidence", "")
 
     # Check suppression BEFORE updating the rate-limit timer.
@@ -735,11 +741,19 @@ async def notify_vehicle_idle(event_data: dict,
 
     _last_vehicle_idle_notification = now
 
+    # Format duration as human-readable string
+    if duration_raw >= 3600:
+        duration_str = f"{duration_raw / 3600:.1f} hours"
+    elif duration_raw >= 60:
+        duration_str = f"{duration_raw / 60:.0f} min"
+    else:
+        duration_str = f"{duration_raw:.0f}s"
+
     parts = [f"\U0001f697 <b>Vehicle Idling</b>"]
     parts.append(f"\u2022 Type: {vehicle_class}")
     if zone:
         parts.append(f"\u2022 Zone: {zone}")
-    parts.append(f"\u2022 Duration: {duration}s")
+    parts.append(f"\u2022 Stationary: {duration_str}")
     if confidence:
         parts.append(f"\u2022 Confidence: {confidence}")
     parts.append(f"\u2022 Time: {_now_str()}")
@@ -750,8 +764,8 @@ async def notify_vehicle_idle(event_data: dict,
     # Use provided snapshot bytes, fall back to live frame
     frame = snapshot_bytes if snapshot_bytes else get_latest_frame()
     if frame:
-        # Draw bbox highlight on the snapshot if available
-        bbox_json = event_data.get("bbox", "")
+        # Use snapshot_bbox (matches saved frame) when available
+        bbox_json = event_data.get("snapshot_bbox", "") or event_data.get("bbox", "")
         if bbox_json:
             frame = draw_bbox_on_frame(frame, bbox_json,
                                        label=vehicle_class, color=(0, 165, 255))
@@ -770,20 +784,9 @@ async def notify_vehicle_idle(event_data: dict,
             confidence=float(confidence) if confidence else 0.0,
         )
 
-    # --- Follow up with a 5-second video clip ---
-    try:
-        loop = asyncio.get_running_loop()
-        clip_bytes = await loop.run_in_executor(
-            None, lambda: build_clip(duration=5.0, fps=10)
-        )
-        if clip_bytes:
-            clip_caption = f"\U0001f3ac <b>Vehicle Idle Clip</b> — {vehicle_class}"
-            await broadcast_video(clip_bytes, clip_caption)
-            logger.info(f"Vehicle idle clip sent ({len(clip_bytes) / 1024:.0f} KB)")
-        else:
-            logger.debug("build_clip returned None — skipping video")
-    except Exception as e:
-        logger.warning(f"Vehicle idle clip failed: {e}")
+    # Note: No follow-up clip for vehicle idle — the snapshot with bbox is the
+    # useful artifact. A live clip captured now would show the current scene,
+    # not when the vehicle was first detected (it may have already left).
 
     return msg_id
 

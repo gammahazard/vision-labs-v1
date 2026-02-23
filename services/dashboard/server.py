@@ -594,8 +594,9 @@ async def _event_notification_poller():
                         event_type = data.get("event_type", "")
 
                         if event_type == "person_appeared":
-                            # Always save snapshot with highlighted bbox
-                            bbox_json = data.get("bbox", "")
+                            # Use snapshot_bbox (matches the saved snapshot frame)
+                            # instead of live bbox to avoid bbox/frame mismatch
+                            bbox_json = data.get("snapshot_bbox", "") or data.get("bbox", "")
                             evt_snap_key = data.get("snapshot_key", "")
                             snap_bytes = await loop.run_in_executor(
                                 None, lambda eid=msg_id, bb=bbox_json, sk=evt_snap_key: _save_snapshot(eid, bb, sk)
@@ -608,8 +609,8 @@ async def _event_notification_poller():
                                 )
 
                         elif event_type == "person_identified":
-                            # Save snapshot with highlighted bbox for feedback modal
-                            bbox_json = data.get("bbox", "")
+                            # Use snapshot_bbox to match saved frame
+                            bbox_json = data.get("snapshot_bbox", "") or data.get("bbox", "")
                             evt_snap_key = data.get("snapshot_key", "")
                             snap_bytes = await loop.run_in_executor(
                                 None, lambda eid=msg_id, bb=bbox_json, sk=evt_snap_key: _save_snapshot(eid, bb, sk)

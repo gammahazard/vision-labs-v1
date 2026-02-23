@@ -96,7 +96,7 @@ HD_FRAME_KEY = stream_key(_HD_FRAME_TMPL, camera_id=CAMERA_ID)
 
 MAX_EVENT_STREAM_LEN = 5000  # Keep more events than frames (they're small)
 VEHICLE_RATE_LIMIT_SEC = 3  # Max 1 vehicle event per 3 seconds
-VEHICLE_IDLE_TIMEOUT = float(os.getenv("VEHICLE_IDLE_TIMEOUT", "5.0"))  # Seconds before idle alert
+VEHICLE_IDLE_TIMEOUT = float(os.getenv("VEHICLE_IDLE_TIMEOUT", "90.0"))  # Seconds stationary before idle alert
 VEHICLE_LOST_TIMEOUT = 10.0  # Seconds before dropping a tracked vehicle
 VEHICLE_IOU_THRESHOLD = 0.2  # Lower than person IoU — vehicles don't move much when parked
 CONFIG_RELOAD_INTERVAL = 10  # Check config every N detection messages
@@ -186,6 +186,10 @@ class TrackedVehicle:
         self.idle_alerted = False           # Whether idle notification was sent
         self.snapshot_key = ""              # Redis key for stored snapshot
         self.snapshot_bbox = bbox           # Bbox at the time snapshot was captured
+        # Track center positions for movement detection
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        self.center_history: list[tuple] = [(cx, cy)]
 
     def update(self, bbox: list, confidence: float, timestamp: float):
         """Update vehicle state with a new detection."""
@@ -193,11 +197,33 @@ class TrackedVehicle:
         self.confidence = confidence
         self.last_seen = timestamp
         self.frame_count += 1
+        # Track center for movement detection (keep last 20)
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        self.center_history.append((cx, cy))
+        if len(self.center_history) > 20:
+            self.center_history.pop(0)
 
     @property
     def duration(self) -> float:
         """How long this vehicle has been seen (seconds)."""
         return self.last_seen - self.first_seen
+
+    @property
+    def is_stationary(self) -> bool:
+        """Check if the vehicle has stayed in roughly the same spot.
+        Returns True if the max displacement from the first recorded center
+        is less than 30 pixels (in sub-stream coordinates ~640x480).
+        """
+        if len(self.center_history) < 5:
+            return False  # Not enough data yet
+        first_cx, first_cy = self.center_history[0]
+        max_drift = 0.0
+        for cx, cy in self.center_history:
+            drift = ((cx - first_cx) ** 2 + (cy - first_cy) ** 2) ** 0.5
+            if drift > max_drift:
+                max_drift = drift
+        return max_drift < 30.0  # < 30px drift = stationary
 
     @property
     def center(self) -> tuple:
@@ -372,11 +398,14 @@ class PersonTracker:
         }
 
         # Save a snapshot at event emission time for person events
-        # so the dashboard uses the correct frame, not the (stale) live frame
+        # so the dashboard uses the correct frame, not the (stale) live frame.
+        # Also save the bbox that matches the snapshot frame so the dashboard
+        # draws the box in the right place (not a stale detection bbox).
         if event_type in ("person_appeared", "person_identified"):
-            snap_key = self._save_person_snapshot(timestamp)
+            snap_key = self._save_person_snapshot(timestamp, person.bbox)
             if snap_key:
                 event["snapshot_key"] = snap_key
+                event["snapshot_bbox"] = json.dumps(person.bbox)
 
         if extra:
             event.update(extra)
@@ -393,9 +422,11 @@ class PersonTracker:
             f"{zone_str}"
         )
 
-    def _save_person_snapshot(self, timestamp: float) -> str | None:
+    def _save_person_snapshot(self, timestamp: float, bbox: list = None) -> str | None:
         """
         Grab the latest camera frame and save it to Redis for this person event.
+        Also saves the corresponding bbox so the dashboard can draw the box on
+        the correct frame (avoiding bbox/frame timing mismatches).
         Returns the Redis key or None if no frame available.
         Uses 2h TTL (matches dashboard snapshot cleanup).
         """
@@ -412,6 +443,12 @@ class PersonTracker:
 
             snap_key = stream_key(_PSNAP_TMPL, camera_id=CAMERA_ID, timestamp=int(timestamp))
             self.r.setex(snap_key, 7200, frame_bytes)  # 2h TTL
+
+            # Save companion bbox key so dashboard draws box in the right place
+            if bbox:
+                bbox_key = f"{snap_key}:bbox"
+                self.r.setex(bbox_key, 7200, json.dumps(bbox))
+
             return snap_key
         except Exception as e:
             logger.debug(f"Person snapshot save failed: {e}")
@@ -471,8 +508,9 @@ class PersonTracker:
                     veh.snapshot_key = snap_key
                     veh.snapshot_bbox = bbox  # Store bbox matching the snapshot frame
 
-                # Check for idle timeout
+                # Check for idle timeout — only if vehicle is actually stationary
                 if (veh.duration >= VEHICLE_IDLE_TIMEOUT
+                        and veh.is_stationary
                         and not veh.idle_alerted):
                     veh.idle_alerted = True
                     self._emit_vehicle_idle_event(veh, timestamp)
