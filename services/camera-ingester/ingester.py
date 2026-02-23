@@ -31,6 +31,7 @@ CONFIG (via environment variables):
 import os
 import sys
 import time
+import random
 import signal
 import logging
 import threading
@@ -235,7 +236,7 @@ def run():
 
             if not ret:
                 consecutive_failures += 1
-                if consecutive_failures >= 30:
+                if consecutive_failures >= 100:  # ~10s of failures before reconnect
                     logger.warning("Too many consecutive read failures — reconnecting...")
                     break  # Break inner loop to trigger reconnect
                 time.sleep(0.1)
@@ -293,7 +294,7 @@ def run_hd_stream():
     logger.info(f"Starting HD stream thread for '{CAMERA_ID}'")
     r_hd = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
     frame_interval = 1.0 / HD_TARGET_FPS
-    reconnect_delay = RECONNECT_DELAY_SECONDS
+    reconnect_delay = 8  # Start higher than sub-stream to give it reconnect priority
 
     while not _shutdown:
         try:
@@ -319,7 +320,7 @@ def run_hd_stream():
             ret, frame = cap.read()
             if not ret:
                 consecutive_failures += 1
-                if consecutive_failures >= 30:
+                if consecutive_failures >= 100:  # ~10s of failures before reconnect
                     logger.warning("HD stream: too many failures — reconnecting")
                     break
                 time.sleep(0.1)
@@ -344,7 +345,9 @@ def run_hd_stream():
 
         cap.release()
         if not _shutdown:
-            time.sleep(reconnect_delay)
+            # Stagger HD reconnect so it doesn't collide with sub-stream
+            stagger = random.uniform(1, 5)
+            time.sleep(reconnect_delay + stagger)
             reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
 
     logger.info("HD stream thread stopped")
