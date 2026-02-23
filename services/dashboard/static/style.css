@@ -69,16 +69,75 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
- * Header — Status bar with live stats
+ * Navbar — Top navigation bar with logo, links, and live stats
  * --------------------------------------------------------------------------- */
-header {
+.navbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 24px;
+    padding: 0 1.5rem;
+    height: 52px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border);
-    height: 60px;
+    flex-shrink: 0;
+}
+
+.navbar-left {
+    display: flex;
+    align-items: center;
+    gap: 1.2rem;
+    min-width: 0;
+}
+
+.navbar-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    text-decoration: none;
+    color: var(--text-primary);
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.navbar-logo {
+    color: var(--accent);
+    font-size: 1.2rem;
+}
+
+.navbar-links {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.nav-link {
+    padding: 0.4rem 0.9rem;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: color 0.15s ease, background 0.15s ease;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.nav-link:hover,
+.nav-link:active {
+    color: var(--text-primary);
+    background: #1a2235;
+}
+
+.nav-link--active {
+    color: var(--accent);
+    background: var(--accent-bg);
+}
+
+.navbar-stats {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-shrink: 0;
 }
 
 .header-left {
@@ -1172,15 +1231,45 @@ input[type="range"]::-moz-range-thumb {
         overflow: auto;
     }
 
-    header {
+    /* Navbar: wrap stats below nav links */
+    .navbar {
         flex-wrap: wrap;
         height: auto;
-        padding: 10px 16px;
-        gap: 8px;
+        padding: 8px 12px;
+        gap: 4px;
     }
 
-    .header-right {
-        gap: 12px;
+    .navbar-left {
+        gap: 0.6rem;
+        flex: 1;
+        min-width: 0;
+    }
+
+    /* Hide status badge on mobile to save space */
+    .navbar-left>.status-badge {
+        display: none;
+    }
+
+    .navbar-links {
+        gap: 2px;
+    }
+
+    .nav-link {
+        padding: 0.35rem 0.6rem;
+        font-size: 0.82rem;
+        /* Larger touch target */
+        min-height: 36px;
+        display: flex;
+        align-items: center;
+    }
+
+    /* Stats bar: full width second row */
+    .navbar-stats {
+        width: 100%;
+        justify-content: space-around;
+        padding: 4px 0 2px;
+        border-top: 1px solid var(--border);
+        gap: 0;
     }
 
     .stat-label {
@@ -1220,6 +1309,18 @@ input[type="range"]::-moz-range-thumb {
 
     .zone-name-input {
         width: 100px;
+    }
+
+    /* Touch-friendly: prevent accidental zoom on double-tap */
+    .panel-header {
+        min-height: 44px;
+    }
+
+    /* Smoother touch scrolling */
+    .panel-body,
+    .sidebar,
+    .event-list {
+        -webkit-overflow-scrolling: touch;
     }
 }
 

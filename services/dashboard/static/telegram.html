@@ -264,27 +264,15 @@
 
 <body>
     <!-- Navbar -->
-    <nav class="navbar"
-        style="display:flex;align-items:center;justify-content:space-between;padding:0 1.5rem;height:52px;background:#111827;border-bottom:1px solid #2d3748;">
-        <div style="display:flex;align-items:center;gap:1.2rem;">
-            <a href="/"
-                style="display:flex;align-items:center;gap:0.5rem;text-decoration:none;color:#f1f5f9;font-weight:600;">
-                <span style="color:#4ade80;font-size:1.2rem;">◉</span> Vision Labs
+    <nav class="navbar">
+        <div class="navbar-left">
+            <a href="/" class="navbar-brand">
+                <span class="navbar-logo">◉</span> Vision Labs
             </a>
-            <div style="display:flex;gap:0.25rem;">
-                <a href="/"
-                    style="padding:0.4rem 0.9rem;border-radius:8px;text-decoration:none;color:#94a3b8;font-size:0.88rem;font-weight:500;"
-                    onmouseover="this.style.color='#f1f5f9';this.style.background='#1a2235'"
-                    onmouseout="this.style.color='#94a3b8';this.style.background='transparent'">🏠
-                    Home</a>
-                <a href="/ai.html"
-                    style="padding:0.4rem 0.9rem;border-radius:8px;text-decoration:none;color:#94a3b8;font-size:0.88rem;font-weight:500;"
-                    onmouseover="this.style.color='#f1f5f9';this.style.background='#1a2235'"
-                    onmouseout="this.style.color='#94a3b8';this.style.background='transparent'">🤖
-                    AI</a>
-                <a href="/telegram.html"
-                    style="padding:0.4rem 0.9rem;border-radius:8px;text-decoration:none;color:#4ade80;font-size:0.88rem;font-weight:500;background:rgba(74,222,128,0.1);">🔐
-                    Telegram</a>
+            <div class="navbar-links">
+                <a href="/" class="nav-link">🏠 Home</a>
+                <a href="/ai.html" class="nav-link">🤖 AI</a>
+                <a href="/telegram.html" class="nav-link nav-link--active">🔐 Telegram</a>
             </div>
         </div>
     </nav>
