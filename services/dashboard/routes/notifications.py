@@ -427,7 +427,7 @@ async def broadcast_video(video_bytes: bytes, caption: str = "") -> int:
 def build_clip(duration: float = 5.0, fps: int = 10) -> bytes | None:
     """
     Capture frames from the Redis stream and encode as MP4 clip.
-    Collects frames for `duration` seconds at `fps` rate.
+    Collects frames for `duration` seconds using xread to get unique frames.
     Returns MP4 bytes or None on failure.
     """
     import cv2
@@ -439,41 +439,63 @@ def build_clip(duration: float = 5.0, fps: int = 10) -> bytes | None:
         r_bin = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
         frames = []
         target_count = int(duration * fps)
-        interval = 1.0 / fps
         start = _time.monotonic()
+        stream_key = ctx.FRAME_STREAM.encode()
 
-        for _ in range(target_count):
-            entries = r_bin.xrevrange(ctx.FRAME_STREAM.encode(), count=1)
-            if entries:
-                _, data = entries[0]
-                frame_bytes = data.get(b"frame")
-                if frame_bytes and len(frame_bytes) > 100:
-                    nparr = np.frombuffer(frame_bytes, np.uint8)
-                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    if img is not None:
-                        frames.append(img)
+        # Get the latest stream ID as our starting point
+        latest = r_bin.xrevrange(stream_key, count=1)
+        if not latest:
+            logger.warning("build_clip: no frames in stream")
+            return None
+        last_id = latest[0][0]  # Start AFTER this frame
 
-            # Wait for next frame
+        # Grab the first frame immediately
+        _, data = latest[0]
+        frame_bytes = data.get(b"frame")
+        if frame_bytes and len(frame_bytes) > 100:
+            nparr = np.frombuffer(frame_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is not None:
+                frames.append(img)
+
+        # Read NEW frames using xread(block=...) — only returns genuinely new entries
+        while len(frames) < target_count:
             elapsed = _time.monotonic() - start
-            expected = len(frames) * interval
-            if expected > elapsed:
-                _time.sleep(expected - elapsed)
+            if elapsed > duration + 3:
+                break  # Safety timeout
 
-            # Safety timeout
-            if _time.monotonic() - start > duration + 2:
-                break
+            # Block up to 500ms waiting for a new frame
+            result = r_bin.xread({stream_key: last_id}, count=5, block=500)
+            if not result:
+                continue  # No new frames yet, retry
+
+            for _, entries in result:
+                for entry_id, data in entries:
+                    last_id = entry_id
+                    frame_bytes = data.get(b"frame")
+                    if frame_bytes and len(frame_bytes) > 100:
+                        nparr = np.frombuffer(frame_bytes, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            frames.append(img)
+                    if len(frames) >= target_count:
+                        break
 
         if len(frames) < 5:
             logger.warning(f"build_clip: only captured {len(frames)} frames, need at least 5")
             return None
 
-        # Encode to MP4
+        # Calculate actual FPS from capture timing
+        actual_duration = _time.monotonic() - start
+        actual_fps = len(frames) / actual_duration if actual_duration > 0 else fps
+
+        # Encode to MP4 using actual capture FPS so playback speed matches reality
         h, w = frames[0].shape[:2]
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
+        writer = cv2.VideoWriter(tmp_path, fourcc, actual_fps, (w, h))
         for f in frames:
             writer.write(f)
         writer.release()
@@ -487,6 +509,7 @@ def build_clip(duration: float = 5.0, fps: int = 10) -> bytes | None:
             logger.warning(f"build_clip: video too small ({len(video_bytes)} bytes)")
             return None
 
+        logger.info(f"build_clip: captured {len(frames)} unique frames in {actual_duration:.1f}s ({actual_fps:.1f} fps)")
         return video_bytes
 
     except Exception as e:
