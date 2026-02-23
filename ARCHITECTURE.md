@@ -140,7 +140,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `vehicle_snapshot:{camera_id}:{ts}` | String (TTL 24h) | tracker | dashboard | Raw JPEG bytes |
 | `frame_hd:{camera_id}` | String (TTL 5s) | camera-ingester (HD thread) | dashboard (HD toggle) | Raw JPEG bytes of main stream frame |
 | `telegram:users` | Hash | dashboard (seed + CRUD) | bot_commands, notifications | `{user_id: JSON{chat_id, name, username, approved_at}}` |
-| `telegram:access_log` | Stream (maxlen 1000) | bot_commands (poller) | dashboard (Telegram page) | `{user_id, username, first_name, chat_id, action, authorized, timestamp}` |
+| `telegram:access_log` | Stream (maxlen 500) | bot_commands (poller) | dashboard (Telegram page) | `{user_id, username, first_name, last_name, language_code, chat_id, action, authorized, timestamp}` |
 
 **Default camera_id:** `front_door`
 
@@ -201,9 +201,10 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 1. tracker emits person_appeared or person_identified to events stream
 2. dashboard background poller (_event_notification_poller):
    - XREAD events stream (blocking, in threadpool executor)
-   - ALWAYS on person_appeared: grab latest frame, save as JPEG to /data/snapshots/{event_id}.jpg
-   - If Telegram configured + person_appeared: rate-limited (1 per 60s), send Telegram photo
-   - If Telegram configured + person_identified: NOT rate-limited, always send Telegram photo
+   - ALWAYS on person_appeared/person_identified/vehicle_detected/vehicle_idle: save snapshot JPEG to /data/snapshots/{event_id}.jpg
+   - If Telegram configured + person_appeared: rate-limited (1 per 60s), send Telegram photo with feedback buttons
+   - If Telegram configured + person_identified + suppress_known OFF: send Telegram photo (not rate-limited)
+   - If Telegram configured + vehicle_idle: rate-limited (1 per 60s), send Telegram photo
    - Old snapshots auto-cleaned every ~200s (files older than 2 hours)
 3. Dashboard frontend shows snapshot thumbnails in the event feed
 4. Telegram receives photo + HTML-formatted caption (when configured)
@@ -257,7 +258,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### camera-ingester (`services/camera-ingester/ingester.py`)
 
-**~297 lines.** Single file, no dependencies beyond OpenCV + Redis.
+**~363 lines.** Single file, no dependencies beyond OpenCV + Redis.
 
 - **RTSP connection:** Uses sub-stream (640×480) for AI inference; optional HD thread reads main stream and caches latest frame in Redis for a live HD toggle
 - **Frame throttling:** `cap.grab()` discards frames between captures to hit TARGET_FPS
@@ -268,7 +269,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### pose-detector (`services/pose-detector/detector.py`)
 
-**~282 lines.** GPU service.
+**~388 lines.** GPU service.
 
 - **Model:** YOLOv8s-pose (auto-downloaded on first run, cached in Docker volume `yolo-models`)
 - **Consumer group:** `pose_detectors` — can run multiple instances for load balancing
@@ -279,7 +280,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### vehicle-detector (`services/vehicle-detector/detector.py`)
 
-**~270 lines.** GPU service. Mirrors pose-detector architecture.
+**~321 lines.** GPU service. Mirrors pose-detector architecture.
 
 - **Model:** YOLOv8s (general object detection, auto-downloaded, cached in Docker volume `yolo-models`)
 - **Consumer group:** `vehicle_detectors` — reads from same frame stream as pose-detector
@@ -293,7 +294,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### tracker (`services/tracker/tracker.py`)
 
-**~747 lines.** CPU-only, most complex service.
+**~928 lines.** CPU-only, most complex service.
 
 **Core algorithm:**
 - Maintains a dict of `TrackedPerson` objects, each with: person_id, bbox, first_seen, last_seen, action, action_history, confirmed (bool)
@@ -324,7 +325,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### face-recognizer (`services/face-recognizer/recognizer.py` + `face_db.py`)
 
-**~603 + ~383 lines.** GPU service + SQLite DB + REST API.
+**~731 + ~462 lines.** GPU service + SQLite DB + REST API.
 
 **Dual role:**
 1. **Background loop** — reads detections, crops faces, matches embeddings, publishes identities
@@ -359,13 +360,18 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 
 ### Backend (`services/dashboard/server.py`)
 
-**~1075 lines.** FastAPI with modular routes.
+**~1077 lines.** FastAPI with modular routes.
 
 **Startup sequence:**
 1. Initialize auth SQLite database (create default admin/admin if empty)
 2. Write default config to Redis if not present
-3. Start background event notification poller (async task)
-4. Mount static files, include all route modules
+3. Initialize feedback database (self-learning suppression rules)
+4. Initialize AI assistant database (config, reminders, chat history)
+5. Start background event notification poller (async task)
+6. Start Telegram bot command poller (callback queries + commands)
+7. Start reminder poller (checks every 60s for due AI-scheduled reminders)
+8. Pull + warm up Ollama AI model in background (`think=False`, `keep_alive="4h"`)
+9. Mount static files, include all route modules
 
 **WebSocket `/ws/live`:**
 - Reads latest frame + detections + state + identities every ~100ms
@@ -398,7 +404,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 | `ai_tools.py` | (internal, called by `ai.py`) | 21 tool schemas + executor functions (events, events by date, patterns, activity heatmap, faces, unknowns, show faces, feedback, retrain, record verdict, live scene, capture snapshot/clip, weather, vehicles, zones, notifications, Telegram, reminders, status, review) |
 | `ai_prompts.py` | (internal, called by `ai.py`) | Dynamic system prompt builder with live system info |
 | `ai_state.py` | (internal) | Per-request media side-channel state (snapshot/clip stash, request UUID) |
-| `bot_commands.py` | (internal, background task) | Telegram bot polling loop + command handlers (/snapshot, /clip, /status, /ask, /arm, /disarm, /who, /events, /help) |
+| `bot_commands.py` | (internal, background task) | Telegram bot polling loop + 14 command handlers (/snapshot, /clip, /status, /ask, /arm, /disarm, /who, /events, /zones, /rules, /night, /faces, /timelapse, /help) |
 | `telegram_access.py` | `GET /api/telegram/users`, `POST /api/telegram/users`, `DELETE /api/telegram/users/{id}`, `GET /api/telegram/access-log` | Telegram user CRUD + access audit log |
 
 **Shared state pattern:** `routes/__init__.py` defines module-level variables (`r`, `r_bin`, `logger`, `FACE_API_URL`, `HD_FRAME_KEY`, all stream keys). `server.py` sets these before importing routers. Each route module does `import routes as ctx` to access them. `r` is the text Redis client (`decode_responses=True`) and `r_bin` is the binary client (`decode_responses=False`) for JPEG frame data.
@@ -411,11 +417,11 @@ All files in `services/dashboard/static/`. No build step — plain HTML/JS/CSS.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `index.html` | ~554 | Main dashboard: video feed, sidebar panels (events, faces, unknowns, zones, conditions, settings, notifications, auth). Enrollment wizard modal. Label modal. |
-| `ai.html` | ~145 | AI assistant page (onboarding wizard + chat interface) |
-| `telegram.html` | ~352 | Telegram Access Manager page (approved users + access log) |
+| `index.html` | ~546 | Main dashboard: video feed, sidebar panels (events, faces, unknowns, zones, conditions, settings, notifications, auth). Enrollment wizard modal. Label modal. |
+| `ai.html` | ~133 | AI assistant page (onboarding wizard + chat interface) |
+| `telegram.html` | ~340 | Telegram Access Manager page (approved users + access log) |
 | `login.html` | ~403 | Login page with animated pulsing eye icon, dark theme, fade-in form |
-| `style.css` | ~2261 | Full dark theme, glassmorphism panels, responsive layout, zone editor styles, wizard overlay styles, event photo lightbox modal |
+| `style.css` | ~2421 | Full dark theme, glassmorphism panels, responsive navbar (CSS-class-based, mobile 2-row wrap), zone editor styles, wizard overlay styles, event photo lightbox modal |
 | `ai.css` | ~682 | AI assistant page styles (chat bubbles, onboarding wizard, tool status) |
 | `app.js` | ~341 | Core: WebSocket connect (auto-reconnect 2s), FPS counter, settings sliders (debounced 300ms POST), notification status, `init()` orchestrator |
 | `ai.js` | ~484 | AI chat client: onboarding wizard, message rendering (markdown + inline images), tool-call status display |
@@ -423,7 +429,7 @@ All files in `services/dashboard/static/`. No build step — plain HTML/JS/CSS.
 | `events.js` | ~356 | Polls `/api/events` every 2s, deduplicates by event ID, renders event cards with icons + clickable photo thumbnails (face photos for known users, camera snapshots for unknowns), lightbox modal for full-size viewing |
 | `faces.js` | ~385 | Multi-angle enrollment wizard (5 angles: front/left/right/up/down), face gallery grouped by name, delete all angles for a person |
 | `unknowns.js` | ~192 | Unknown faces gallery, label modal (dropdown of known names OR free text), bulk clear |
-| `conditions.js` | ~167 | Fetches `/api/conditions` every 5min, renders time periods, sunrise/sunset, weather emoji mapping |
+| `conditions.js` | ~174 | Fetches `/api/conditions` every 5min, renders time periods, sunrise/sunset, weather emoji mapping |
 | `zones.js` | ~527 | Canvas overlay zone drawing (click-to-place polygon, double-click to close), drag-to-edit vertices, letterbox-aware coordinate normalization, zone list with color-coded alert levels |
 | `feedback.js` | ~374 | Feedback review queue: verdict history, suppression rules, stats panel, quick-resolve actions |
 | `browse.js` | ~173 | Vehicle snapshot browser: day picker, thumbnail grid, face gallery tab |
@@ -754,8 +760,8 @@ vision-labsv1/
 │   │
 │   └── dashboard/
 │       ├── Dockerfile
-│       ├── server.py             # FastAPI + WebSocket (~1075 lines)
-│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~572 lines)
+│       ├── server.py             # FastAPI + WebSocket (~1077 lines)
+│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~581 lines)
 │       ├── ai_db.py              # AI config + reminders + chat history (SQLite, ~236 lines)
 │       ├── requirements.txt
 │       ├── routes/
@@ -770,18 +776,18 @@ vision-labsv1/
 │       │   ├── notifications.py  # Telegram integration (~815 lines)
 │       │   ├── feedback.py       # Feedback + suppression rules API (~123 lines)
 │       │   ├── browse.py         # Vehicle snapshot browser + faces gallery (~158 lines)
-│       │   ├── ai.py             # AI assistant chat endpoint (~309 lines)
+│       │   ├── ai.py             # AI assistant chat endpoint (~313 lines)
 │       │   ├── ai_tools.py       # 21 AI tool schemas + executors (~1350 lines)
 │       │   ├── ai_prompts.py     # Dynamic system prompt builder (~118 lines)
 │       │   ├── ai_state.py       # Per-request media side-channel (~94 lines)
-│       │   ├── bot_commands.py   # Telegram bot polling + 11 commands (~1170 lines)
+│       │   ├── bot_commands.py   # Telegram bot polling + 14 commands (~1179 lines)
 │       │   └── telegram_access.py # Telegram user CRUD + access log (~105 lines)
 │       └── static/
-│           ├── index.html        # Main dashboard layout (~554 lines)
-│           ├── ai.html           # AI assistant (onboarding + chat, ~145 lines)
-│           ├── telegram.html     # Telegram Access Manager (~352 lines)
+│           ├── index.html        # Main dashboard layout (~546 lines)
+│           ├── ai.html           # AI assistant (onboarding + chat, ~133 lines)
+│           ├── telegram.html     # Telegram Access Manager (~340 lines)
 │           ├── login.html        # Login page (~403 lines)
-│           ├── style.css         # Full CSS (~2261 lines)
+│           ├── style.css         # Full CSS (~2421 lines)
 │           ├── ai.css            # AI page styles (~682 lines)
 │           ├── app.js            # Core + WebSocket + init (~341 lines)
 │           ├── ai.js             # AI chat + wizard logic (~484 lines)
@@ -789,7 +795,7 @@ vision-labsv1/
 │           ├── events.js         # Event feed (~356 lines)
 │           ├── faces.js          # Face enrollment wizard (~385 lines)
 │           ├── unknowns.js       # Unknown faces gallery (~192 lines)
-│           ├── conditions.js     # Conditions panel (~167 lines)
+│           ├── conditions.js     # Conditions panel (~174 lines)
 │           ├── zones.js          # Zone editor + canvas (~527 lines)
 │           ├── browse.js         # Vehicle snapshot browser (~173 lines)
 │           ├── feedback.js       # Feedback review queue (~374 lines)
