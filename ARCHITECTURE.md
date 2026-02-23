@@ -449,20 +449,20 @@ All files in `services/dashboard/static/`. No build step — plain HTML/JS/CSS.
 
 | From | To | Mechanism | What |
 |------|----|-----------|------|
-| ingester → detector | Redis Stream (consumer group) | JPEG frames |
-| detector → tracker | Redis Stream (consumer group) | Bboxes + keypoints |
-| detector → recognizer | Redis Stream (separate consumer group) | Same detection stream |
-| recognizer → tracker | Redis Hash (identity_state) | Name ↔ bbox mapping (polled every 2s) |
-| recognizer → dashboard | Redis Hash (identity_state) | Same identity data |
-| tracker → dashboard | Redis Hash (state) | Current tracked persons |
-| tracker → dashboard | Redis Stream (events) | Semantic events |
-| dashboard → detector | Redis Hash (config) | confidence_thresh via hot-reload |
-| dashboard → tracker | Redis Hash (config) | iou_threshold, lost_timeout via hot-reload |
-| dashboard → tracker | Redis Hash (zones) | Zone polygons + alert levels |
-| dashboard → recognizer | **HTTP proxy** (port 8081) | Enrollment, face CRUD, unknowns |
-| dashboard → Telegram | HTTPS API | Photo + caption notifications |
-| browser → dashboard | WebSocket `/ws/live` | Live frame stream (downstream only) |
-| browser → dashboard | REST `/api/*` | Config, events, faces, zones, auth |
+| ingester → detector | Redis Stream (consumer group) | `frames:{camera_id}` | JPEG frames |
+| detector → tracker | Redis Stream (consumer group) | `detections:pose:{camera_id}` | Bboxes + keypoints |
+| detector → recognizer | Redis Stream (separate consumer group) | `detections:pose:{camera_id}` | Same detection stream |
+| recognizer → tracker | Redis Hash | `identity_state:{camera_id}` | Name ↔ bbox mapping (polled every 2s) |
+| recognizer → dashboard | Redis Hash | `identity_state:{camera_id}` | Same identity data |
+| tracker → dashboard | Redis Hash | `state:{camera_id}` | Current tracked persons |
+| tracker → dashboard | Redis Stream | `events:{camera_id}` | Semantic events |
+| dashboard → detector | Redis Hash | `config:{camera_id}` | confidence_thresh via hot-reload |
+| dashboard → tracker | Redis Hash | `config:{camera_id}` | iou_threshold, lost_timeout via hot-reload |
+| dashboard → tracker | Redis Hash | `zones:{camera_id}` | Zone polygons + alert levels |
+| dashboard → recognizer | HTTP proxy | port 8081 | Enrollment, face CRUD, unknowns |
+| dashboard → Telegram | HTTPS API | Telegram Bot API | Photo + caption notifications |
+| browser → dashboard | WebSocket | `/ws/live` | Live frame stream (downstream only) |
+| browser → dashboard | REST | `/api/*` | Config, events, faces, zones, auth |
 
 **Important:** The dashboard → face-recognizer HTTP proxy is the only inter-service communication that bypasses Redis. This is because enrollment is a request/response pattern (user expects immediate feedback), not a fire-and-forget stream.
 
