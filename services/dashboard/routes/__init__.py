@@ -52,4 +52,6 @@ DEFAULT_CONFIG = {
     "suppress_known": "0",
     "notify_cooldown": "60",
     "vehicle_cooldown": "60",
+    "vehicle_confidence_thresh": "0.35",
+    "vehicle_idle_timeout": "90",
 }

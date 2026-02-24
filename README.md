@@ -37,7 +37,7 @@ Ingester --> Redis Streams --> YOLO Pose Detector --> Tracker --> Events
                            --> Ollama (Qwen 3 14B) --> AI Chat
     |
     v
-Recorder --> ffmpeg (copy) --> QNAP NAS (MP4 segments, 28-day rolling)
+Recorder --> ffmpeg (copy) --> QNAP NAS (MPEG-TS segments, 28-day rolling)
 ```
 
 Nine containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
@@ -148,7 +148,7 @@ The web dashboard is accessible from any device on your LAN at port 8080. No app
 Frame arrives from camera (15 FPS)
   -> YOLO detects person bounding boxes + 17 keypoints
   -> Tracker matches boxes across frames via IoU overlap
-  -> Person confirmed after 3 stable frames (debounce)
+  -> Person confirmed after 15 stable frames (~1s debounce)
   -> Action classified from keypoint geometry (no ML -- pure math)
   -> Events emitted: person_appeared, person_left, action_changed
 ```
@@ -210,7 +210,7 @@ When configured with a Telegram bot token, the system sends real-time alerts wit
 
 | Event | Rate Limited? | Includes |
 |-------|---------------|----------|
-| Person detected | Yes (1/min) | Camera snapshot |
+| Person detected | Yes (1/min) | Camera snapshot (4s grace period if suppress_known is on) |
 | Person identified | No | Camera snapshot + name |
 | Vehicle idle | Yes (1/min) | Camera snapshot |
 | Face enrolled | No | Face thumbnail |
@@ -293,20 +293,20 @@ All persistent data stored on the QNAP TS-431X2 NAS (5.2 TB) via Docker CIFS/SMB
 
 | Data | Location | Retention |
 |------|----------|-----------|
-| DVR recordings | `/recordings/front_door/YYYY-MM-DD/HH-MM.mp4` | 28 days (auto-cleanup) |
+| DVR recordings | `/recordings/front_door/YYYY-MM-DD/HH-MM.ts` | 28 days (auto-cleanup) |
 | Event snapshots | `/snapshots/{event_id}.jpg` | Indefinite |
 | Event journal | `/events/YYYY-MM-DD.jsonl` | Indefinite |
 | Telegram audit trail | `/telegram/@username/commands.jsonl` | Indefinite |
 | Telegram snapshots | `/telegram/@username/snapshots/*.jpg` | Indefinite |
 | Telegram clips | `/telegram/@username/clips/*.mp4` | Indefinite |
 
-The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-stream H.264 + AAC audio into 1-hour MP4 segments. Very low CPU usage.
+The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-stream H.264 + AAC audio into MPEG-TS segments via ffmpeg's segment muxer. MPEG-TS is crash-safe — segments are playable even if the recorder is interrupted. Very low CPU usage.
 
 ### Data Retention Policy
 
 | Data | Storage | Location | Retention |
 |------|---------|----------|-----------|
-| **DVR video + audio** | QNAP NAS | `/recordings/front_door/YYYY-MM-DD/HH-MM.mp4` | 28 days (auto-cleanup every 6 hours) |
+| **DVR video + audio** | QNAP NAS | `/recordings/front_door/YYYY-MM-DD/HH-MM.ts` | 28 days (auto-cleanup every 6 hours) |
 | **Event snapshots** | QNAP NAS | `/snapshots/{event_id}.jpg` | Indefinite |
 | **Event journal** | QNAP NAS | `/events/YYYY-MM-DD.jsonl` | Indefinite |
 | **Telegram command log** | QNAP NAS | `/telegram/@username/commands.jsonl` | Indefinite |

@@ -2,7 +2,7 @@
 feedback_db.py — SQLite database for self-learning feedback loop.
 
 PURPOSE:
-    Stores user verdicts on detection events (real threat, false alarm, identified)
+    Stores user verdicts on detection events (real detection, false alarm, identified)
     and builds suppression rules from accumulated feedback patterns.
 
 USAGE:
@@ -204,7 +204,7 @@ class FeedbackDB:
                 "SELECT COUNT(*) FROM suppression WHERE active = 1"
             ).fetchone()[0]
 
-            # Accuracy: of events user responded to, how many were real threats?
+            # Accuracy: of events user responded to, how many were real detections?
             real = by_verdict.get("real_detection", 0)
             false = by_verdict.get("false_alarm", 0)
             accuracy = real / (real + false) if (real + false) > 0 else 0.0

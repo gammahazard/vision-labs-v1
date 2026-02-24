@@ -170,7 +170,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 4. tracker (consumer group "trackers"):
    - XREADGROUP from detections stream
    - IoU matching against tracked persons
-   - If new person: debounce 3 frames, then emit person_appeared
+   - If new person: debounce 15 frames (~1s), then emit person_appeared
    - If person gone > lost_timeout: emit person_left
    - Action classification via contracts/actions.py (debounced 10 frames, sticky 2x)
    - Zone evaluation: point_in_polygon + should_alert (time-based)
@@ -183,7 +183,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
    - For each detected person bbox: crop upper 50% → InsightFace
    - If face found: generate 512-dim embedding, cosine match against SQLite
    - If match > 0.5: publish identity
-   - If unknown with det_score >= 0.85: auto-save to unknowns table
+   - If unknown with det_score >= 0.75: auto-save to unknowns table
    - XADD identities:front_door
    - HSET identity_state:front_door
 
@@ -289,8 +289,8 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - **Model:** YOLOv8s (general object detection, auto-downloaded, cached in Docker volume `yolo-models`)
 - **Consumer group:** `vehicle_detectors` — reads from same frame stream as pose-detector
 - **Class filter:** COCO classes 2 (car), 3 (motorcycle), 5 (bus), 7 (truck) — filtered at inference time
-- **Confidence threshold:** 0.5 (env `CONFIDENCE_THRESH`, raised from 0.4 to reduce false positives)
-- **Min bbox area:** 5000 px² (env `MIN_VEHICLE_BBOX_AREA`) — discards tiny reflections/distant objects
+- **Confidence threshold:** 0.35 default (env `CONFIDENCE_THRESH`; hot-reloaded from Redis `vehicle_confidence_thresh`)
+- **Min bbox area:** 2500 px² default (env `MIN_VEHICLE_BBOX_AREA`) — discards tiny reflections/distant objects
 - **Frame skip:** Default 3 (processes every 3rd frame to save GPU for fast-moving vehicles)
 - **Output:** For each vehicle: `{bbox: [x1,y1,x2,y2], confidence: float, class_name: str, class_id: int}`
 - **Snapshot:** Includes raw frame bytes in detection message for tracker to save as vehicle snapshot
@@ -304,7 +304,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - Maintains a dict of `TrackedPerson` objects, each with: person_id, bbox, first_seen, last_seen, action, action_history, confirmed (bool)
 - Every detection frame: compute IoU matrix between all current persons and new detections
 - Greedy assignment: highest IoU match > threshold → update person; unmatched detections → new person
-- Person confirmed after 3 stable frames (debounce against flickering detections)
+- Person confirmed after 15 stable frames (~1 second debounce; prevents phantom detections)
 
 **Action classification:**
 - Calls `contracts/actions.py` for each person each frame
@@ -322,6 +322,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - Reads `identity_state:{camera_id}` every 2 seconds
 - Matches face-recognizer identity bboxes to tracked persons via IoU
 - Once matched: emits `person_identified` event (fires only once per person per identity assignment)
+- **Identity grace period (suppress_known):** When `suppress_known` is enabled in dashboard config, `person_appeared` announcements are deferred by 4 seconds. If face recognition identifies the person as known within that window, the notification is suppressed entirely. If the grace period expires and the person remains unknown, the notification fires normally.
 - Identity name propagated to all subsequent events for that person
 
 **Vehicle tracking:**
@@ -339,7 +340,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - The dashboard uses `snapshot_bbox` (not the live `bbox`) when drawing annotations, preventing bbox/frame timing mismatches
 
 **Hot-reload config:**
-- Reads `iou_threshold`, `lost_timeout` from Redis config every 10 messages
+- Reads `iou_threshold`, `lost_timeout`, `vehicle_idle_timeout`, `suppress_known` from Redis config every 10 messages
 
 ### face-recognizer (`services/face-recognizer/recognizer.py` + `face_db.py`)
 
@@ -377,10 +378,10 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 **~232 lines.** CPU-only, single file.
 
 - **Purpose:** Continuous DVR recording of the RTSP sub-stream to the QNAP NAS
-- **Method:** `ffmpeg -c copy` — zero-transcode remux of H.264 into MP4 container
+- **Method:** `ffmpeg -c copy` — zero-transcode remux of H.264 into MPEG-TS container (crash-safe — segments are playable even if interrupted)
 - **Transport:** RTSP over TCP for reliability
 - **Segment duration:** 1 hour (3600s, configurable via `SEGMENT_DURATION`)
-- **Storage layout:** `/recordings/{camera_id}/YYYY-MM-DD/HH-MM.mp4` — filenames reflect actual recording start time
+- **Storage layout:** `/recordings/{camera_id}/YYYY-MM-DD/HH-MM.ts` — filenames reflect actual recording start time
 - **Retention:** 28-day rolling cleanup (every 6 hours, removes entire day folders that are older than cutoff)
 - **Reconnect:** Exponential backoff (5s → 10s → 20s → ... → 60s max) on RTSP failure
 - **Graceful shutdown:** SIGTERM/SIGINT handlers terminate the ffmpeg subprocess
@@ -508,7 +509,8 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 | Service | Key(s) | Poll Frequency |
 |---------|--------|----------------|
 | pose-detector | `confidence_thresh` | Every 25 frames (~half second) |
-| tracker | `iou_threshold`, `lost_timeout` | Every 10 messages |
+| vehicle-detector | `vehicle_confidence_thresh` | Every 25 frames (~half second) |
+| tracker | `iou_threshold`, `lost_timeout`, `vehicle_idle_timeout`, `suppress_known` | Every 10 messages |
 | tracker | zone definitions | Every 10 seconds |
 | tracker | identity state | Every 2 seconds |
 | dashboard | zone cache for overlay | Every 5 seconds |

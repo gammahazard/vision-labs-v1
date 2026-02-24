@@ -180,10 +180,10 @@ class TestAutoRules:
         assert zt_rules[0]["time_period"] == "morning"
 
     def test_no_rule_for_real_detections(self, db):
-        """Real threat verdicts should never create suppression rules."""
+        """Real detection verdicts should never create suppression rules."""
         for i in range(10):
             db.record_feedback(FeedbackRecord(
-                event_id=f"threat-{i}",
+                event_id=f"detection-{i}",
                 verdict="real_detection",
                 event_type="person_appeared",
                 identity_label="Intruder",

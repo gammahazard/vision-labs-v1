@@ -46,6 +46,7 @@ async def update_config(config: dict):
             "notify_person", "notify_vehicle", "suppress_known",
             "notify_cooldown", "vehicle_cooldown",
             "min_keypoints", "kp_confidence_thresh",
+            "vehicle_confidence_thresh", "vehicle_idle_timeout",
         }
         filtered = {k: str(v) for k, v in config.items() if k in allowed_keys}
 

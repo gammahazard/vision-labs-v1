@@ -69,6 +69,9 @@ CONFIG_KEY = stream_key(_CFG_TMPL, camera_id=CAMERA_ID)
 # Max detections to keep in the output stream
 MAX_DETECTION_STREAM_LEN = 1000
 
+# How often to check Redis for config changes (every N processed frames)
+CONFIG_RELOAD_INTERVAL = 25
+
 # COCO class IDs for vehicles
 # 2=car, 3=motorcycle, 5=bus, 7=truck
 VEHICLE_CLASSES = [2, 3, 5, 7]
@@ -185,6 +188,7 @@ def run():
     frames_processed = 0
     frames_skipped = 0
     total_detections = 0
+    current_confidence = CONFIDENCE_THRESH
 
     logger.info("Entering detection loop...")
 
@@ -228,11 +232,24 @@ def run():
                     frame_num = int(data.get(b"frame_number", 0))
                     cam_id = data.get(b"camera_id", CAMERA_ID.encode()).decode()
 
+                    # --- Hot-reload vehicle confidence from Redis config ---
+                    frames_processed += 1
+                    if frames_processed % CONFIG_RELOAD_INTERVAL == 0:
+                        try:
+                            cfg = r.hget(CONFIG_KEY, "vehicle_confidence_thresh")
+                            if cfg:
+                                new_conf = float(cfg)
+                                if new_conf != current_confidence:
+                                    logger.info(f"Config updated: vehicle confidence {current_confidence} → {new_conf}")
+                                    current_confidence = new_conf
+                        except (ValueError, redis.ConnectionError):
+                            pass
+
                     # --- Run YOLO inference (vehicle classes only) ---
                     t0 = time.time()
                     results = model.predict(
                         frame,
-                        conf=CONFIDENCE_THRESH,
+                        conf=current_confidence,
                         classes=VEHICLE_CLASSES,
                         verbose=False,
                     )
@@ -286,7 +303,6 @@ def run():
                     # Acknowledge the frame
                     r.xack(FRAME_STREAM, CONSUMER_GROUP, msg_id)
 
-                    frames_processed += 1
                     total_detections += len(detections)
 
                     if detections:

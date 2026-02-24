@@ -283,6 +283,7 @@ services:
       - SEGMENT_DURATION=3600
       - RETENTION_DAYS=28
       - LOCATION_TIMEZONE=${LOCATION_TIMEZONE:-America/Toronto}
+      - TZ=${LOCATION_TIMEZONE:-America/Toronto}
     restart: unless-stopped
 
 volumes:

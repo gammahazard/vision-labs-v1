@@ -30,13 +30,19 @@ const fpsValue = document.querySelector("#fpsDisplay .stat-value");
 const inferenceValue = document.querySelector("#inferenceDisplay .stat-value");
 const peopleValue = document.querySelector("#peopleDisplay .stat-value");
 
-// Settings sliders
+// Settings sliders — Person
 const confidenceSlider = document.getElementById("confidenceSlider");
 const confidenceValue = document.getElementById("confidenceValue");
 const iouSlider = document.getElementById("iouSlider");
 const iouValue = document.getElementById("iouValue");
 const lostTimeoutSlider = document.getElementById("lostTimeoutSlider");
 const lostTimeoutValue = document.getElementById("lostTimeoutValue");
+
+// Settings sliders — Vehicle
+const vehicleConfSlider = document.getElementById("vehicleConfSlider");
+const vehicleConfValue = document.getElementById("vehicleConfValue");
+const vehicleIdleSlider = document.getElementById("vehicleIdleSlider");
+const vehicleIdleValue = document.getElementById("vehicleIdleValue");
 
 
 // ---------------------------------------------------------------------------
@@ -209,6 +215,15 @@ iouSlider.addEventListener("input", () =>
 lostTimeoutSlider.addEventListener("input", () =>
     handleSliderChange(lostTimeoutSlider, lostTimeoutValue, "lost_timeout")
 );
+vehicleConfSlider.addEventListener("input", () =>
+    handleSliderChange(vehicleConfSlider, vehicleConfValue, "vehicle_confidence_thresh")
+);
+vehicleIdleSlider.addEventListener("input", () => {
+    const value = parseFloat(vehicleIdleSlider.value);
+    vehicleIdleValue.textContent = value.toFixed(0);
+    if (configDebounce) clearTimeout(configDebounce);
+    configDebounce = setTimeout(() => updateConfig("vehicle_idle_timeout", value), 300);
+});
 
 
 // ---------------------------------------------------------------------------
@@ -231,6 +246,14 @@ async function loadConfig() {
         if (config.lost_timeout) {
             lostTimeoutSlider.value = config.lost_timeout;
             lostTimeoutValue.textContent = parseFloat(config.lost_timeout).toFixed(1);
+        }
+        if (config.vehicle_confidence_thresh) {
+            vehicleConfSlider.value = config.vehicle_confidence_thresh;
+            vehicleConfValue.textContent = parseFloat(config.vehicle_confidence_thresh).toFixed(2);
+        }
+        if (config.vehicle_idle_timeout) {
+            vehicleIdleSlider.value = config.vehicle_idle_timeout;
+            vehicleIdleValue.textContent = parseFloat(config.vehicle_idle_timeout).toFixed(0);
         }
     } catch (err) {
         console.error("Failed to load config:", err);

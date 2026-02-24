@@ -103,6 +103,8 @@ CONFIG_RELOAD_INTERVAL = 10  # Check config every N detection messages
 ACTION_DEBOUNCE_FRAMES = 10  # New action must be stable for N frames before we accept it
 ACTION_STICKY_MULTIPLIER = 2 # Once set, require N * multiplier frames to change away
 MIN_BBOX_AREA = 3072          # ~1% of 640×480 frame — skip tiny distant detections
+IDENTITY_GRACE_SECONDS = 4.0  # When suppress_known is on, wait this long before announcing
+                               # to give face recognition time to identify known people
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -253,6 +255,7 @@ class TrackedPerson:
         self.frame_count = 1               # How many frames they've been in
         self.bbox_history: list[list] = [bbox]  # For direction estimation
         self.announced = False              # Whether we've emitted "person_appeared"
+        self.announce_after = None          # Timestamp when grace period expires (if deferred)
         self.action = "unknown"            # Current (stable) action
         self.action_confidence = 0.0       # How confident in the action classification
         self._pending_action = "unknown"   # Candidate action being debounced
@@ -365,6 +368,8 @@ class PersonTracker:
         self._last_vehicle_event_time = 0.0  # Rate limiting for vehicle events
         self.tracked_vehicles: dict[str, TrackedVehicle] = {}  # vehicle_id → TrackedVehicle
         self._next_vehicle_id = 1  # Simple incrementing ID counter
+        self.vehicle_idle_timeout = VEHICLE_IDLE_TIMEOUT  # Hot-reloadable via Redis config
+        self.suppress_known = False  # Hot-reloadable: skip alerts for identified people
 
     def _generate_id(self) -> str:
         """Generate a short, readable person ID."""
@@ -509,7 +514,7 @@ class PersonTracker:
                     veh.snapshot_bbox = bbox  # Store bbox matching the snapshot frame
 
                 # Check for idle timeout — only if vehicle is actually stationary
-                if (veh.duration >= VEHICLE_IDLE_TIMEOUT
+                if (veh.duration >= self.vehicle_idle_timeout
                         and veh.is_stationary
                         and not veh.idle_alerted):
                     veh.idle_alerted = True
@@ -782,9 +787,14 @@ class PersonTracker:
 
                 # Emit "person_appeared" on first stable detection (after ~1 second)
                 person = self.tracked[best_track_id]
-                if not person.announced and person.frame_count >= 15:
-                    self._emit_event("person_appeared", person, current_time)
-                    person.announced = True
+                if not person.announced and person.announce_after is None and person.frame_count >= 15:
+                    if self.suppress_known:
+                        # Defer announcement — give face recognition time to identify
+                        person.announce_after = current_time + IDENTITY_GRACE_SECONDS
+                    else:
+                        # No suppress_known — announce immediately
+                        self._emit_event("person_appeared", person, current_time)
+                        person.announced = True
                 elif (person.announced
                       and prev_action != person.action
                       and prev_action not in ("unknown", "")
@@ -818,7 +828,24 @@ class PersonTracker:
         # --- Step 4: Update identities from face recognizer ---
         self._update_identities()
 
-        # --- Step 5: Update scene state in Redis ---
+        # --- Step 5: Check deferred announcements (identity grace period) ---
+        for person in self.tracked.values():
+            if person.announce_after is not None and not person.announced:
+                if person.identity_name:
+                    # Known person identified during grace period — skip announce
+                    person.announced = True
+                    person.announce_after = None
+                    logger.info(
+                        f"Grace period: suppressed person_appeared for known "
+                        f"'{person.identity_name}' ({person.person_id})"
+                    )
+                elif current_time >= person.announce_after:
+                    # Grace period expired, still unknown — announce now
+                    self._emit_event("person_appeared", person, current_time)
+                    person.announced = True
+                    person.announce_after = None
+
+        # --- Step 6: Update scene state in Redis ---
         self._update_state()
 
 
@@ -914,6 +941,8 @@ def run():
                         try:
                             cfg_iou = r.hget(CONFIG_KEY, "iou_threshold")
                             cfg_timeout = r.hget(CONFIG_KEY, "lost_timeout")
+                            cfg_vidle = r.hget(CONFIG_KEY, "vehicle_idle_timeout")
+                            cfg_suppress = r.hget(CONFIG_KEY, "suppress_known")
                             if cfg_iou:
                                 new_iou = float(cfg_iou)
                                 if new_iou != tracker.iou_threshold:
@@ -924,6 +953,16 @@ def run():
                                 if new_timeout != tracker.lost_timeout:
                                     logger.info(f"Config updated: lost_timeout {tracker.lost_timeout} → {new_timeout}")
                                     tracker.lost_timeout = new_timeout
+                            if cfg_vidle:
+                                new_vidle = float(cfg_vidle)
+                                if new_vidle != tracker.vehicle_idle_timeout:
+                                    logger.info(f"Config updated: vehicle_idle_timeout {tracker.vehicle_idle_timeout} → {new_vidle}")
+                                    tracker.vehicle_idle_timeout = new_vidle
+                            if cfg_suppress is not None:
+                                new_suppress = cfg_suppress in ("1", b"1")
+                                if new_suppress != tracker.suppress_known:
+                                    logger.info(f"Config updated: suppress_known {tracker.suppress_known} → {new_suppress}")
+                                    tracker.suppress_known = new_suppress
                         except (ValueError, redis.ConnectionError):
                             pass
 

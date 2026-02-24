@@ -39,7 +39,7 @@ import numpy as np
 import redis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 
 # Import stream key definitions from contracts (single source of truth)
 import sys
@@ -137,6 +137,8 @@ DEFAULT_CONFIG = {
     "suppress_known": "0",         # Auto-suppress alerts for known/identified people
     "notify_cooldown": "60",       # Seconds between person notifications
     "vehicle_cooldown": "60",      # Seconds between vehicle notifications
+    "vehicle_confidence_thresh": "0.35",  # Vehicle detector YOLO confidence
+    "vehicle_idle_timeout": "90",  # Seconds before vehicle_idle alert
 }
 
 # ---------------------------------------------------------------------------
@@ -223,6 +225,7 @@ app.include_router(telegram_access_router)
 # Paths that don't require authentication
 _AUTH_EXEMPT = {
     "/login.html", "/api/auth/login", "/api/auth/status",
+    "/api/login-bg",
     "/style.css", "/auth.js", "/favicon.ico",
 }
 
@@ -249,6 +252,44 @@ async def auth_middleware(request: Request, call_next):
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     return RedirectResponse("/login.html")
+
+
+# ---------------------------------------------------------------------------
+# Public login background — heavily blurred camera snapshot (no auth)
+# ---------------------------------------------------------------------------
+@app.get("/api/login-bg")
+async def login_background():
+    """Serve a small, heavily blurred snapshot for the login page background.
+    No authentication required, but the image is blurred beyond recognition
+    so it cannot be used for surveillance."""
+    try:
+        frame = None
+        # Try HD frame first
+        if route_ctx.HD_FRAME_KEY:
+            frame = route_ctx.r_bin.get(route_ctx.HD_FRAME_KEY.encode())
+        # Fall back to sub-stream
+        if not frame:
+            entries = route_ctx.r_bin.xrevrange(route_ctx.FRAME_STREAM.encode(), count=1)
+            if entries:
+                _, data = entries[0]
+                frame = data.get(b"frame")
+        if not frame:
+            return Response(status_code=204)
+        # Decode, blur heavily, shrink, and re-encode at low quality
+        np_arr = np.frombuffer(frame, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return Response(status_code=204)
+        # Resize to small (fast blur), then blur aggressively
+        h, w = img.shape[:2]
+        small = cv2.resize(img, (w // 4, h // 4))
+        blurred = cv2.GaussianBlur(small, (51, 51), 30)
+        _, jpeg = cv2.imencode(".jpg", blurred, [cv2.IMWRITE_JPEG_QUALITY, 30])
+        return Response(content=jpeg.tobytes(), media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        logger.warning("login-bg failed: %s", exc, exc_info=True)
+        return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
