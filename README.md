@@ -300,7 +300,26 @@ All persistent data stored on the QNAP TS-431X2 NAS (5.2 TB) via Docker CIFS/SMB
 | Telegram snapshots | `/telegram/@username/snapshots/*.jpg` | Indefinite |
 | Telegram clips | `/telegram/@username/clips/*.mp4` | Indefinite |
 
-The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-stream H.264 into 1-hour MP4 segments. Very low CPU usage.
+The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-stream H.264 + AAC audio into 1-hour MP4 segments. Very low CPU usage.
+
+### Data Retention Policy
+
+| Data | Storage | Location | Retention |
+|------|---------|----------|-----------|
+| **DVR video + audio** | QNAP NAS | `/recordings/front_door/YYYY-MM-DD/HH-MM.mp4` | 28 days (auto-cleanup every 6 hours) |
+| **Event snapshots** | QNAP NAS | `/snapshots/{event_id}.jpg` | Indefinite |
+| **Event journal** | QNAP NAS | `/events/YYYY-MM-DD.jsonl` | Indefinite |
+| **Telegram command log** | QNAP NAS | `/telegram/@username/commands.jsonl` | Indefinite |
+| **Telegram snapshots** | QNAP NAS | `/telegram/@username/snapshots/*.jpg` | Indefinite |
+| **Telegram clips** | QNAP NAS | `/telegram/@username/clips/*.mp4` | Indefinite |
+| **Face embeddings** | Local Docker volume | SQLite (`face-data`) | Indefinite (enrolled faces persist forever) |
+| **Unknown face crops** | Local Docker volume | `face-data/unknowns/*.jpg` | Indefinite |
+| **User feedback** | Local Docker volume | SQLite (`auth-data/feedback.db`) | Indefinite |
+| **AI chat history** | Local Docker volume | SQLite (`auth-data/ai.db`) | Indefinite |
+| **Suppression rules** | Local Docker volume | SQLite (`auth-data/feedback.db`) | Indefinite (until manually deleted) |
+| **Detection events (live)** | Redis stream | `vision:events` | ~10,000 entries (Redis maxlen, rolling) |
+| **Camera frames** | Redis hash | `vision:frame:*` | Overwritten each frame (~67ms lifespan) |
+| **Tracking state** | Redis hashes | `vision:tracks:*` | Evicted after 5s inactivity |
 
 ### Future (All Just Redis Workers)
 
