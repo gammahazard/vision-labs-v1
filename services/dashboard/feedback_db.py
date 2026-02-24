@@ -39,7 +39,7 @@ logger = logging.getLogger("dashboard.feedback")
 class FeedbackRecord:
     """A single user verdict on a detection event."""
     event_id: str                    # Redis event stream ID (e.g., "1708472312-0")
-    verdict: str                     # "real_threat", "false_alarm", "identified"
+    verdict: str                     # "real_detection", "false_alarm", "identified"
     event_type: str                  # "person_appeared", "vehicle_detected", etc.
     identity_label: str = ""         # Name if user identified someone (e.g., "Mail Carrier")
     zone: str = ""                   # Zone name where event occurred
@@ -205,7 +205,7 @@ class FeedbackDB:
             ).fetchone()[0]
 
             # Accuracy: of events user responded to, how many were real threats?
-            real = by_verdict.get("real_threat", 0)
+            real = by_verdict.get("real_detection", 0)
             false = by_verdict.get("false_alarm", 0)
             accuracy = real / (real + false) if (real + false) > 0 else 0.0
 
@@ -375,8 +375,8 @@ class FeedbackDB:
             false_alarms = conn.execute(
                 "SELECT COUNT(*) FROM feedback WHERE verdict = 'false_alarm'"
             ).fetchone()[0]
-            real_threats = conn.execute(
-                "SELECT COUNT(*) FROM feedback WHERE verdict = 'real_threat'"
+            real_detections = conn.execute(
+                "SELECT COUNT(*) FROM feedback WHERE verdict = 'real_detection'"
             ).fetchone()[0]
 
             summary = {
@@ -386,7 +386,7 @@ class FeedbackDB:
                 "total_new_rules": new_identity + new_zone_time,
                 "total_feedback_records": total_feedback,
                 "false_alarms": false_alarms,
-                "real_threats": real_threats,
+                "real_detections": real_detections,
                 "identity_threshold": self.IDENTITY_THRESHOLD,
                 "zone_time_threshold": self.ZONE_TIME_THRESHOLD,
             }

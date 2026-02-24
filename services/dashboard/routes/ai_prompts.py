@@ -55,7 +55,7 @@ async def build_system_context() -> str:
             parts.append(
                 f"Feedback stats: {stats.get('total_feedback', 0)} total, "
                 f"{stats.get('false_alarms', 0)} false alarms, "
-                f"{stats.get('real_threats', 0)} real threats, "
+                f"{stats.get('real_detections', 0)} real detections, "
                 f"{stats.get('active_rules', 0)} active suppression rules"
             )
         except Exception:

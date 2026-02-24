@@ -36,7 +36,7 @@ def set_feedback_db(db):
 
 
 class VerdictRequest(BaseModel):
-    verdict: str                  # "real_threat", "false_alarm", "identified"
+    verdict: str                  # "real_detection", "false_alarm", "identified"
     identity_label: Optional[str] = ""
 
 
@@ -73,7 +73,7 @@ async def submit_verdict(event_id: str, body: VerdictRequest):
     if not _feedback_db:
         return JSONResponse(status_code=503, content={"error": "Feedback DB not initialized"})
 
-    if body.verdict not in ("real_threat", "false_alarm", "identified"):
+    if body.verdict not in ("real_detection", "false_alarm", "identified"):
         return JSONResponse(status_code=400, content={"error": "Invalid verdict"})
 
     # Get existing record before resolving (to find telegram_message_id)
@@ -90,8 +90,8 @@ async def submit_verdict(event_id: str, body: VerdictRequest):
                 msg_id = existing["telegram_message_id"]
                 if body.verdict == "identified" and body.identity_label:
                     await edit_message_buttons(msg_id, f"👤 {body.identity_label} — Named")
-                elif body.verdict == "real_threat":
-                    await edit_message_buttons(msg_id, "✅ Real Threat — Dashboard")
+                elif body.verdict == "real_detection":
+                    await edit_message_buttons(msg_id, "✅ Real Detection — Dashboard")
                 elif body.verdict == "false_alarm":
                     await edit_message_buttons(msg_id, "❌ False Alarm — Dashboard")
             except Exception as e:

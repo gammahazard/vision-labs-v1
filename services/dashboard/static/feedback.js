@@ -28,7 +28,7 @@ async function loadFeedbackStats() {
         if (!el) return;
 
         const total = stats.total_feedback || 0;
-        const real = (stats.by_verdict || {}).real_threat || 0;
+        const real = (stats.by_verdict || {}).real_detection || 0;
         const falseA = (stats.by_verdict || {}).false_alarm || 0;
         const identified = (stats.by_verdict || {}).identified || 0;
         const pending = (stats.by_verdict || {}).pending || 0;
@@ -97,7 +97,7 @@ async function loadFeedbackHistory() {
             let verdictClass = '';
             let actions = '';
             switch (item.verdict) {
-                case 'real_threat':
+                case 'real_detection':
                     verdictBadge = '✅ Real';
                     verdictClass = 'verdict-real';
                     break;
@@ -119,7 +119,7 @@ async function loadFeedbackHistory() {
                     verdictClass = 'verdict-pending';
                     actions = `
                         <span class="feedback-actions">
-                            <button class="feedback-action-btn fb-real" onclick="event.stopPropagation(); quickResolve('${item.event_id}', 'real_threat')" title="Real threat">✅</button>
+                            <button class="feedback-action-btn fb-real" onclick="event.stopPropagation(); quickResolve('${item.event_id}', 'real_detection')" title="Real detection">✅</button>
                             <button class="feedback-action-btn fb-false" onclick="event.stopPropagation(); quickResolve('${item.event_id}', 'false_alarm')" title="False alarm">❌</button>
                             <button class="feedback-action-btn fb-name" onclick="event.stopPropagation(); openFeedbackNameModal('${item.event_id}')" title="Name this person">👤</button>
                         </span>`;

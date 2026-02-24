@@ -994,7 +994,7 @@ async def _handle_callback(callback_data: str, callback_id: str,
     Process a Telegram callback_query from an inline keyboard button.
 
     callback_data format: "v:{verdict}:{event_id}"
-      - v:real:{event_id}     → Real threat
+      - v:real:{event_id}     → Real detection
       - v:false:{event_id}    → False alarm
       - v:identify:{event_id} → User wants to name this person
     """
@@ -1010,7 +1010,7 @@ async def _handle_callback(callback_data: str, callback_id: str,
     _, verdict_code, event_id = parts
 
     verdict_map = {
-        "real": "real_threat",
+        "real": "real_detection",
         "false": "false_alarm",
         "identify": "identified",
     }
@@ -1026,7 +1026,7 @@ async def _handle_callback(callback_data: str, callback_id: str,
         logger.info(f"Event {event_id}: marked for identification via Telegram")
     else:
         feedback_db.resolve_pending(event_id, verdict)
-        label = "✅ Real Threat" if verdict == "real_threat" else "❌ False Alarm"
+        label = "✅ Real Detection" if verdict == "real_detection" else "❌ False Alarm"
         await answer_callback_query(callback_id, f"Recorded: {label}")
         await edit_message_buttons(message_id, f"{label} — Recorded", chat_id=chat_id)
         logger.info(f"Event {event_id}: verdict={verdict} via Telegram")

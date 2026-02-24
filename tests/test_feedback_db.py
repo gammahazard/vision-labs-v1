@@ -64,13 +64,13 @@ class TestFeedbackCRUD:
 
         record2 = FeedbackRecord(
             event_id="test-001",
-            verdict="real_threat",
+            verdict="real_detection",
             event_type="person_appeared",
         )
         db.record_feedback(record2)
 
         retrieved = db.get_feedback("test-001")
-        assert retrieved["verdict"] == "real_threat"
+        assert retrieved["verdict"] == "real_detection"
 
     def test_get_recent_feedback(self, db):
         """Recent feedback returns newest first, limited by count."""
@@ -107,7 +107,7 @@ class TestStats:
         """Stats should correctly count verdicts and compute accuracy."""
         for i in range(3):
             db.record_feedback(FeedbackRecord(
-                event_id=f"real-{i}", verdict="real_threat",
+                event_id=f"real-{i}", verdict="real_detection",
                 event_type="person_appeared",
             ))
         for i in range(7):
@@ -118,7 +118,7 @@ class TestStats:
 
         stats = db.get_stats()
         assert stats["total_feedback"] == 10
-        assert stats["by_verdict"]["real_threat"] == 3
+        assert stats["by_verdict"]["real_detection"] == 3
         assert stats["by_verdict"]["false_alarm"] == 7
         assert stats["alert_accuracy"] == 0.3  # 3/10
 
@@ -179,12 +179,12 @@ class TestAutoRules:
         assert zt_rules[0]["zone"] == "Driveway"
         assert zt_rules[0]["time_period"] == "morning"
 
-    def test_no_rule_for_real_threats(self, db):
+    def test_no_rule_for_real_detections(self, db):
         """Real threat verdicts should never create suppression rules."""
         for i in range(10):
             db.record_feedback(FeedbackRecord(
                 event_id=f"threat-{i}",
-                verdict="real_threat",
+                verdict="real_detection",
                 event_type="person_appeared",
                 identity_label="Intruder",
                 zone="Backyard",
@@ -324,12 +324,12 @@ class TestPendingEvents:
 
     def test_resolve_nonexistent_creates_record(self, db):
         """Resolving a non-existent event should upsert a new feedback record."""
-        ok = db.resolve_pending("nonexistent", "real_threat")
+        ok = db.resolve_pending("nonexistent", "real_detection")
         assert ok is True
         # Verify the record was created
         record = db.get_feedback("nonexistent")
         assert record is not None
-        assert record["verdict"] == "real_threat"
+        assert record["verdict"] == "real_detection"
 
     def test_lookup_by_telegram_message_id(self, db):
         """Can look up pending events by Telegram message ID."""

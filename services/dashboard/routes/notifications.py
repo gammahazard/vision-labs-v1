@@ -235,7 +235,7 @@ def _make_feedback_buttons(event_id: str) -> dict:
     """
     return {
         "inline_keyboard": [[
-            {"text": "✅ Real Threat", "callback_data": f"v:real:{event_id}"},
+            {"text": "✅ Real Detection", "callback_data": f"v:real:{event_id}"},
             {"text": "❌ False Alarm", "callback_data": f"v:false:{event_id}"},
             {"text": "👤 It's...", "callback_data": f"v:identify:{event_id}"},
         ]]

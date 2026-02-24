@@ -157,7 +157,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "review_feedback",
-            "description": "Get recent user feedback records showing how the user has rated past alerts (real_threat, false_alarm, identified). Useful for understanding patterns and reviewing the learning history.",
+            "description": "Get recent user feedback records showing how the user has rated past alerts (real_detection, false_alarm, identified). Useful for understanding patterns and reviewing the learning history.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -344,13 +344,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "record_verdict",
-            "description": "Record a verdict (false_alarm or real_threat) for a recent event. Use when the user says something like 'mark that as false alarm' or 'that was real'. Gets the most recent event by default, or a specific one if event_id is provided.",
+            "description": "Record a verdict (false_alarm or real_detection) for a recent event. Use when the user says something like 'mark that as false alarm' or 'that was real'. Gets the most recent event by default, or a specific one if event_id is provided.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "verdict": {
                         "type": "string",
-                        "enum": ["false_alarm", "real_threat"],
+                        "enum": ["false_alarm", "real_detection"],
                         "description": "The verdict to record",
                     },
                     "event_id": {
@@ -1223,8 +1223,8 @@ def _tool_record_verdict(args: dict) -> str:
         return json.dumps({"error": "Feedback database not available"})
 
     verdict = args.get("verdict", "")
-    if verdict not in ("false_alarm", "real_threat"):
-        return json.dumps({"error": f"Invalid verdict: {verdict}. Must be 'false_alarm' or 'real_threat'"})
+    if verdict not in ("false_alarm", "real_detection"):
+        return json.dumps({"error": f"Invalid verdict: {verdict}. Must be 'false_alarm' or 'real_detection'"})
 
     event_id = args.get("event_id", "")
     identity_label = args.get("identity_label", "")
