@@ -296,23 +296,23 @@ volumes:
     driver: local
     driver_opts:
       type: cifs
-      device: //192.168.1.250/vision-labs/snapshots
-      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"
+      device: //${QNAP_IP}/vision-labs/snapshots
+      o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"
   qnap-recordings:
     driver: local
     driver_opts:
       type: cifs
-      device: //192.168.1.250/vision-labs/recordings
-      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"
+      device: //${QNAP_IP}/vision-labs/recordings
+      o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"
   qnap-events:
     driver: local
     driver_opts:
       type: cifs
-      device: //192.168.1.250/vision-labs/events
-      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"
+      device: //${QNAP_IP}/vision-labs/events
+      o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"
   qnap-telegram:
     driver: local
     driver_opts:
       type: cifs
-      device: //192.168.1.250/vision-labs/telegram
-      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"
+      device: //${QNAP_IP}/vision-labs/telegram
+      o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"
