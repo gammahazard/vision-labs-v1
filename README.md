@@ -2,7 +2,7 @@
 
 > **Real hardware. Real-time inference. Self-learning alerts.**
 
-An event-driven, microservices-based security camera system that detects people, tracks them across frames, recognizes known faces, and learns which alerts matter to you over time. Runs entirely on a single PC with a GPU, orchestrated via Docker Compose.
+An event-driven, microservices-based security camera system that detects people, tracks them across frames, recognizes known faces, and learns which alerts matter to you over time. Continuous DVR recording to a QNAP NAS with 28-day rolling retention. Runs entirely on a single PC with a GPU, orchestrated via Docker Compose.
 
 ---
 
@@ -35,9 +35,12 @@ Ingester --> Redis Streams --> YOLO Pose Detector --> Tracker --> Events
                            --> Dashboard (WebSocket --> Browser)
                            --> Telegram Notifications
                            --> Ollama (Qwen 3 14B) --> AI Chat
+    |
+    v
+Recorder --> ffmpeg (copy) --> QNAP NAS (MP4 segments, 28-day rolling)
 ```
 
-Eight containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
+Nine containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
 
 | Service | Purpose | GPU? |
 |---------|---------|------|
@@ -49,6 +52,7 @@ Eight containerized services communicate through Redis Streams -- no direct inte
 | **face-recognizer** | InsightFace embedding + enrollment API | Yes |
 | **dashboard** | FastAPI + WebSocket + static frontend | No |
 | **ollama** | Local LLM inference (Qwen 3 14B) | Yes |
+| **recorder** | Continuous DVR recording to QNAP NAS (ffmpeg) | No |
 
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive -- service internals, Redis key map, data flow diagrams, and design decisions.
 
@@ -265,6 +269,7 @@ Suppression is checked **before** the rate-limit timer — suppressed events don
 | Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 21 tools | Done |
 | Phase 7.5 | Telegram Access Manager -- per-user auth, enrollment flow, access log, dashboard page | Done |
 | Phase 8 | Extended bot commands + AI tools -- /zones, /rules, /night, /faces, /timelapse, activity heatmap, record_verdict, show_faces | Done |
+| Phase 9 | QNAP NAS storage -- DVR recording, event journal, Telegram audit trail | Done |
 
 ### Phase 7: AI Assistant
 
@@ -282,9 +287,23 @@ Expanded Telegram bot and AI assistant capabilities:
 - **Night override awareness** -- `/night` command shows current period and active override status
 - **AI learning loop** -- `record_verdict` allows conversational feedback ("mark that as false alarm") while keeping the AI read-only on rule modification
 
+### QNAP NAS Storage (Phase 9)
+
+All persistent data stored on the QNAP TS-431X2 NAS (5.2 TB) via Docker CIFS/SMB volumes:
+
+| Data | Location | Retention |
+|------|----------|-----------|
+| DVR recordings | `/recordings/front_door/YYYY-MM-DD/HH-MM.mp4` | 28 days (auto-cleanup) |
+| Event snapshots | `/snapshots/{event_id}.jpg` | Indefinite |
+| Event journal | `/events/YYYY-MM-DD.jsonl` | Indefinite |
+| Telegram audit trail | `/telegram/@username/commands.jsonl` | Indefinite |
+| Telegram snapshots | `/telegram/@username/snapshots/*.jpg` | Indefinite |
+| Telegram clips | `/telegram/@username/clips/*.mp4` | Indefinite |
+
+The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-stream H.264 into 1-hour MP4 segments. Very low CPU usage.
+
 ### Future (All Just Redis Workers)
 
-- Event clip recording (10s clips around detections, archived to NAS)
 - License plate reader (YOLO + PaddleOCR)
 - Vehicle re-identification (same car tracking across visits)
 - Cross-camera person tracking
@@ -326,7 +345,7 @@ Fits on any 12GB+ NVIDIA GPU. The RTX 3090 (24 GB) has ~13 GB headroom.
 ```
 vision-labs/
 |-- .env.example                  # Environment template (copy to .env)
-|-- docker-compose.yml            # All 8 services orchestrated
+|-- docker-compose.yml            # All 9 services orchestrated
 |-- ARCHITECTURE.md               # Full technical deep dive
 |-- v2.md                         # Phased build plan with design rationale
 |
@@ -342,6 +361,7 @@ vision-labs/
 |   |-- tracker/                  # Person ID assignment + event publishing
 |   |-- face-recognizer/          # InsightFace + enrollment REST API (GPU)
 |   |-- vehicle-detector/         # YOLOv8s vehicle detection (GPU)
+|   |-- recorder/                 # DVR recording to QNAP NAS (ffmpeg)
 |   +-- dashboard/                # FastAPI backend + static frontend
 |       |-- server.py             # App factory, WebSocket handler, middleware
 |       |-- feedback_db.py        # Feedback + suppression rules (SQLite)

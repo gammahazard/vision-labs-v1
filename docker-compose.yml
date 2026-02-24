@@ -237,7 +237,9 @@ services:
     volumes:
       - ./contracts:/app/contracts:ro
       - auth-data:/data
-      - snapshot-data:/data/snapshots
+      - qnap-snapshots:/data/snapshots
+      - qnap-events:/data/events
+      - qnap-telegram:/data/telegram
     environment:
       - CAMERA_ID=front_door
       - REDIS_HOST=redis
@@ -262,13 +264,55 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # Recorder — Continuous DVR recording to QNAP NAS
+  # ---------------------------------------------------------------------------
+  # Records the RTSP sub-stream directly to 1-hour MP4 segments.
+  # Uses ffmpeg copy (no transcode) — very low CPU usage.
+  # 28-day rolling retention with automatic cleanup.
+  recorder:
+    build:
+      context: ./services/recorder
+    network_mode: host
+    volumes:
+      - qnap-recordings:/recordings
+    environment:
+      - CAMERA_ID=front_door
+      - RTSP_URL=rtsp://${CAMERA_USER}:${CAMERA_PASSWORD}@${CAMERA_IP}:554/h264Preview_01_sub
+      - RECORDING_DIR=/recordings
+      - SEGMENT_DURATION=3600
+      - RETENTION_DAYS=28
+      - LOCATION_TIMEZONE=${LOCATION_TIMEZONE:-America/Toronto}
+    restart: unless-stopped
+
 volumes:
   redis-data:
   face-data:
   yolo-models:
   insightface-models:
   auth-data:
-  snapshot-data:
   ollama-models:
-
-
+  qnap-snapshots:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.1.250/vision-labs/snapshots
+      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"
+  qnap-recordings:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.1.250/vision-labs/recordings
+      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"
+  qnap-events:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.1.250/vision-labs/events
+      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"
+  qnap-telegram:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //192.168.1.250/vision-labs/telegram
+      o: "addr=192.168.1.250,username=admin,password=245EBE28F915,file_mode=0777,dir_mode=0777"

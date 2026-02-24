@@ -1,7 +1,7 @@
 # Vision Labs — Architecture Reference
 
 > **Last updated:** Feb 23, 2026
-> **Status:** Phases 0–8 complete. 21-tool AI assistant. Telegram Access Manager. Extended bot commands.
+> **Status:** Phases 0–9 complete. 21-tool AI assistant. Telegram Access Manager. Extended bot commands. DVR recording + QNAP NAS storage.
 > **Hardware:** RTX 3090 PC, Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
 
 This document is the definitive reference for how the system works. If you lose context, start here.
@@ -100,8 +100,9 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
                               │
                               ▼
                      ┌──────────────┐
-                     │  QNAP NAS    │ (192.168.2.20)
-                     │  FTP archive │
+                     │  QNAP NAS    │ (192.168.1.250)
+                     │  DVR + Events│
+                     │  + Snapshots │
                      └──────────────┘
 ```
 
@@ -119,6 +120,7 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
 | **face-recognizer** | vision-labsv1-face-recognizer-1 | 8081 | Yes | InsightFace embedding + REST API |
 | **dashboard** | vision-labsv1-dashboard-1 | 8080 | No | FastAPI + WebSocket + static frontend |
 | **ollama** | vision-labsv1-ollama-1 | 11434 | Yes | Local LLM inference (Qwen 3 14B) |
+| **recorder** | vision-labsv1-recorder-1 | — | No | DVR recording to QNAP NAS (ffmpeg remux) |
 
 ---
 
@@ -209,6 +211,7 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
    - Old snapshots auto-cleaned every ~200s (files older than 2 hours)
 3. Dashboard frontend shows snapshot thumbnails in the event feed
 4. Telegram receives photo + HTML-formatted caption (when configured)
+5. All events journaled to daily JSONL files on QNAP NAS (`/data/events/YYYY-MM-DD.jsonl`)
 ```
 
 ### Face Enrollment Flow (user-initiated)
@@ -368,6 +371,21 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 - Applies 120% horizontal + 100% vertical padding around face bbox
 - Crops from full frame (not head region) for natural portrait look
 - Resizes to 200×200 JPEG
+
+### recorder (`services/recorder/recorder.py`)
+
+**~232 lines.** CPU-only, single file.
+
+- **Purpose:** Continuous DVR recording of the RTSP sub-stream to the QNAP NAS
+- **Method:** `ffmpeg -c copy` — zero-transcode remux of H.264 into MP4 container
+- **Transport:** RTSP over TCP for reliability
+- **Segment duration:** 1 hour (3600s, configurable via `SEGMENT_DURATION`)
+- **Storage layout:** `/recordings/{camera_id}/YYYY-MM-DD/HH-MM.mp4` — filenames reflect actual recording start time
+- **Retention:** 28-day rolling cleanup (every 6 hours, removes entire day folders that are older than cutoff)
+- **Reconnect:** Exponential backoff (5s → 10s → 20s → ... → 60s max) on RTSP failure
+- **Graceful shutdown:** SIGTERM/SIGINT handlers terminate the ffmpeg subprocess
+- **CPU usage:** Negligible — no decoding or transcoding, just remuxes the raw stream
+- **Docker:** `network_mode: host` to reach camera RTSP directly
 
 ---
 
@@ -540,7 +558,7 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 
 ### docker-compose.yml
 
-8 services, 7 named volumes:
+9 services, 11 named volumes:
 
 | Volume | Mount Point | Purpose |
 |--------|-------------|---------|
@@ -551,6 +569,10 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 | `auth-data` | `/data` (dashboard) | Auth + feedback + AI SQLite databases |
 | `snapshot-data` | `/data/snapshots` (dashboard) | Event + vehicle snapshots (persists across container restarts) |
 | `ollama-models` | `/root/.ollama` (ollama) | Qwen 3 14B model weights (~9.3 GB) |
+| `qnap-snapshots` | `/data/snapshots` (dashboard) | Event snapshots on QNAP NAS (CIFS) |
+| `qnap-recordings` | `/recordings` (recorder) | DVR MP4 segments on QNAP NAS (CIFS) |
+| `qnap-events` | `/data/events` (dashboard) | Daily JSONL event journal on QNAP NAS (CIFS) |
+| `qnap-telegram` | `/data/telegram` (dashboard) | Per-user Telegram audit trail on QNAP NAS (CIFS) |
 
 ### Shared Contract Mounting
 
@@ -580,7 +602,7 @@ deploy:
 ### Network
 
 - Default bridge network for inter-container communication
-- `camera-ingester` uses `network_mode: host` to reach the camera at 192.168.2.10
+- `camera-ingester` and `recorder` use `network_mode: host` to reach the camera at 192.168.2.10
 - Dashboard exposes port 8080 to host
 - Face-recognizer exposes port 8081 (internal, proxied by dashboard)
 
@@ -619,7 +641,16 @@ All tests in `tests/`. Run with: `pytest tests/ -v`
 | **7: AI Assistant** | ✅ Complete | Ollama + Qwen 3 14B, onboarding wizard, chat UI, 21 tools (query events/faces/unknowns/feedback/patterns, live scene, capture snapshot with weather+scene description, capture 5-second video clip in chat, weather, browse vehicles/zones/notification history, retrain rules, send Telegram, schedule reminders, system status, activity heatmap, record verdict, show faces) |
 | **7.5: Telegram Access Manager** | ✅ Complete | Web-based user management page. Approve/revoke Telegram users, view access log. Unauthorized bot access emits `unauthorized_access` events to event stream |
 
-**Minor remaining from Phase 6:** Event clip recording (10s clips around detections, saved to QNAP via FTP/NFS).
+**Minor remaining from Phase 6:** Event clip recording (10s clips around detections, saved to QNAP).
+
+### Phase 9: QNAP NAS Storage (Implemented)
+
+| Feature | Implementation |
+|---------|---------------|
+| **DVR recording** | `services/recorder/recorder.py` — ffmpeg remux to 1-hour MP4 segments. 28-day rolling retention. |
+| **Event journal** | `server.py` — all events appended as JSON lines to daily files (`/data/events/YYYY-MM-DD.jsonl`) |
+| **Telegram audit trail** | `bot_commands.py` — per-user command logs + media copies (`/data/telegram/@username/`) |
+| **Docker volumes** | 4 QNAP CIFS volumes: `qnap-snapshots`, `qnap-recordings`, `qnap-events`, `qnap-telegram` |
 
 ---
 
@@ -714,7 +745,7 @@ An alert suppression engine that learns from user feedback over time, reducing f
 |---------|--------|--------|-------------|
 | **Multi-camera reasoning** | 🔴 High | 🟢 High | Correlate front + back camera: track movement through property |
 | **Voice integration** | 🟡 Medium | 🟡 Medium | Expose AI via API so Home Assistant or custom voice assistant can query it |
-| **NAS recording** | 🟢 Low | 🟢 High | QNAP FTP/NFS for continuous recording + event clip storage (weeks of history) |
+| **NAS recording** | ✅ Done | ✅ Done | QNAP CIFS for continuous recording + event journal + audit trail |
 | **Event clip recording** | 🟡 Medium | 🟢 High | 10-second clips around detections, saved alongside snapshots |
 
 ### Architecture Scaling Limits
@@ -736,7 +767,7 @@ vision-labsv1/
 ├── .gitignore                    # Python, Docker, IDE ignores
 ├── ARCHITECTURE.md               # THIS FILE
 ├── README.md                     # Project overview
-├── docker-compose.yml            # All 8 services + 7 volumes
+├── docker-compose.yml            # All 9 services + 11 volumes
 ├── v1.md                         # Original brainstorm
 ├── v2.md                         # Refined build plan
 │
@@ -772,6 +803,10 @@ vision-labsv1/
 │   │   ├── Dockerfile
 │   │   ├── detector.py           # YOLOv8s vehicle detection
 │   │   └── requirements.txt
+│   │
+│   ├── recorder/
+│   │   ├── Dockerfile
+│   │   └── recorder.py           # DVR recording (ffmpeg remux, 28-day retention)
 │   │
 │   └── dashboard/
 │       ├── Dockerfile

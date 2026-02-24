@@ -425,10 +425,33 @@ async def _event_notification_poller():
     # Ensure snapshot directory exists
     SNAPSHOT_DIR = os.path.join(os.environ.get("SNAPSHOT_DIR", "/data/snapshots"))
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    # Snapshots persist indefinitely (will move to NAS for long-term storage)
+    # Snapshots persist indefinitely on QNAP NAS
+
+    # Event journal directory (daily JSONL files)
+    EVENT_JOURNAL_DIR = os.environ.get("EVENT_JOURNAL_DIR", "/data/events")
+    os.makedirs(EVENT_JOURNAL_DIR, exist_ok=True)
+
+    def _journal_event(msg_id: str, data: dict):
+        """Append event to daily JSONL file for persistent audit trail."""
+        try:
+            _tz = ZoneInfo(os.getenv("LOCATION_TIMEZONE", "America/Toronto"))
+            ts = float(data.get("timestamp", time.time()))
+            dt = datetime.fromtimestamp(ts, tz=_tz)
+            day_str = dt.strftime("%Y-%m-%d")
+            journal_path = os.path.join(EVENT_JOURNAL_DIR, f"{day_str}.jsonl")
+            entry = {
+                "id": msg_id if isinstance(msg_id, str) else msg_id.decode(),
+                "timestamp": ts,
+                "time": dt.strftime("%H:%M:%S"),
+                **{k: v for k, v in data.items() if k != "timestamp"},
+            }
+            with open(journal_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.debug(f"Event journal write failed: {e}")
 
     last_id = "$"  # Only process new events from this point forward
-    logger.info(f"Event poller started — snapshots → {SNAPSHOT_DIR}, vehicles → {VEHICLE_SNAPSHOT_DIR}")
+    logger.info(f"Event poller started — snapshots → {SNAPSHOT_DIR}, vehicles → {VEHICLE_SNAPSHOT_DIR}, journal → {EVENT_JOURNAL_DIR}")
 
     loop = asyncio.get_event_loop()
 
@@ -584,6 +607,11 @@ async def _event_notification_poller():
                     for msg_id, data in messages:
                         last_id = msg_id
                         event_type = data.get("event_type", "")
+
+                        # Journal ALL events to daily JSONL
+                        await loop.run_in_executor(
+                            None, _journal_event, msg_id, data
+                        )
 
                         if event_type == "person_appeared":
                             # Use snapshot_bbox (matches the saved snapshot frame)

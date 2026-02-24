@@ -49,6 +49,55 @@ TZ_LOCAL = ZoneInfo(os.getenv("LOCATION_TIMEZONE", "America/Toronto"))
 # Telegram update offset — tracks which updates we've processed
 _telegram_update_offset = 0
 
+# Telegram audit trail directory (per-user command logs + media)
+TELEGRAM_LOG_DIR = os.environ.get("TELEGRAM_LOG_DIR", "/data/telegram")
+
+
+def _log_telegram_command(username: str, user_id: str, command: str,
+                          media_path: str = ""):
+    """Log a Telegram command to the per-user audit trail on QNAP."""
+    try:
+        folder_name = f"@{username}" if username else f"id_{user_id}"
+        user_dir = os.path.join(TELEGRAM_LOG_DIR, folder_name)
+        os.makedirs(user_dir, exist_ok=True)
+
+        now = datetime.now(TZ_LOCAL)
+        entry = {
+            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "user_id": user_id,
+            "username": username,
+            "command": command,
+        }
+        if media_path:
+            entry["media"] = media_path
+
+        log_path = os.path.join(user_dir, "commands.jsonl")
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        logger.debug(f"Telegram audit log failed: {e}")
+
+
+def _save_telegram_media(username: str, user_id: str,
+                         media_bytes: bytes, media_type: str,
+                         ext: str = ".jpg") -> str:
+    """Save media (snapshot/clip) to the per-user audit folder. Returns relative path."""
+    try:
+        folder_name = f"@{username}" if username else f"id_{user_id}"
+        subdir = "snapshots" if media_type == "snapshot" else "clips"
+        media_dir = os.path.join(TELEGRAM_LOG_DIR, folder_name, subdir)
+        os.makedirs(media_dir, exist_ok=True)
+
+        now = datetime.now(TZ_LOCAL)
+        fname = now.strftime(f"%Y-%m-%d_%H%M%S{ext}")
+        path = os.path.join(media_dir, fname)
+        with open(path, "wb") as f:
+            f.write(media_bytes)
+        return os.path.join(folder_name, subdir, fname)
+    except Exception as e:
+        logger.debug(f"Telegram media save failed: {e}")
+        return ""
+
 
 def _log_access(user_id, username, first_name, chat_id, action, authorized,
                 last_name="", language_code=""):
@@ -264,7 +313,8 @@ async def poll_telegram_callbacks(feedback_db):
                         cmd = text.split()[0].lower().split("@")[0]  # Strip @botname
                         logger.info(f"Command from user {msg_user_id}: {cmd}")
                         await _handle_command(cmd, chat_id=str(msg_chat_id),
-                                              text=text, user_id=str(msg_user_id))
+                                              text=text, user_id=str(msg_user_id),
+                                              username=msg_username)
 
         except httpx.ReadTimeout:
             # Normal — long poll timed out with no updates
@@ -292,7 +342,7 @@ def _get_user_role(user_id: str) -> str:
 
 
 async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
-                          user_id: str = ""):
+                          user_id: str = "", username: str = ""):
     """Route a bot command to the appropriate handler."""
     # Commands that accept args from the raw text
     args_handlers = {
@@ -320,6 +370,9 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
     }
 
     try:
+        # Log every command to the per-user audit trail
+        _log_telegram_command(username, user_id, text or cmd)
+
         if cmd in admin_handlers:
             role = _get_user_role(user_id)
             if role != "admin":
@@ -327,9 +380,11 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
                 return
             await admin_handlers[cmd](chat_id=chat_id)
         elif cmd in args_handlers:
-            await args_handlers[cmd](chat_id=chat_id, text=text)
+            await args_handlers[cmd](chat_id=chat_id, text=text,
+                                     user_id=user_id, username=username)
         elif cmd in simple_handlers:
-            await simple_handlers[cmd](chat_id=chat_id)
+            await simple_handlers[cmd](chat_id=chat_id,
+                                       user_id=user_id, username=username)
         else:
             await _cmd_help(chat_id=chat_id)
     except Exception as e:
@@ -340,16 +395,20 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
 # ---------------------------------------------------------------------------
 # Bot command implementations
 # ---------------------------------------------------------------------------
-async def _cmd_snapshot(chat_id: str = ""):
+async def _cmd_snapshot(chat_id: str = "", user_id: str = "",
+                        username: str = "", **kwargs):
     """Send a live camera snapshot."""
     frame = get_latest_frame()
     if frame:
+        # Save copy to per-user audit trail on QNAP
+        _save_telegram_media(username, user_id, frame, "snapshot", ".jpg")
         await send_photo(frame, f"📸 Live snapshot — {_now_str()}", chat_id=chat_id)
     else:
         await send_text("⚠️ No camera frame available", chat_id=chat_id)
 
 
-async def _cmd_clip(chat_id: str = "", text: str = ""):
+async def _cmd_clip(chat_id: str = "", text: str = "",
+                    user_id: str = "", username: str = "", **kwargs):
     """Capture and send a video clip (5-40s, default 5)."""
     # Parse optional duration from text: /clip 15
     duration = 5.0
@@ -367,6 +426,8 @@ async def _cmd_clip(chat_id: str = "", text: str = ""):
         None, lambda: build_clip(duration=duration, fps=10)
     )
     if clip_bytes:
+        # Save copy to per-user audit trail on QNAP
+        _save_telegram_media(username, user_id, clip_bytes, "clip", ".mp4")
         await send_video(clip_bytes, f"🎬 {int(duration)}s clip — {_now_str()}", chat_id=chat_id)
     else:
         await send_text("⚠️ Failed to capture clip — not enough frames", chat_id=chat_id)
