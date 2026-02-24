@@ -541,6 +541,9 @@
             style="width:100%; max-height:280px; object-fit:contain; border-radius:8px; margin-bottom:12px; display:none; background:#111; cursor:pointer;"
             title="Click for full size" onclick="if(this.src) _openEventPhoto(this.src, 'Event snapshot')">
         <div id="eventDetailMeta" style="font-size:13px; color:#94a3b8; margin-bottom:12px; line-height:1.6;"></div>
+        <div id="eventDetailAI"
+            style="display:none; font-size:13px; color:#a78bfa; margin-bottom:12px; line-height:1.5; padding:8px 12px; background:rgba(139,92,246,0.08); border-radius:8px; border-left:3px solid #a78bfa;">
+        </div>
         <div id="eventDetailActions" class="label-modal-actions" style="flex-wrap:wrap; gap:8px;">
             <button class="label-modal-save" onclick="eventDetailVerdict('real_detection')">✅ Real Detection</button>
             <button class="label-modal-cancel" style="background:#ef4444;" onclick="eventDetailVerdict('false_alarm')">❌
@@ -562,7 +565,7 @@
 </div>
 
 <!-- Module scripts (loaded before app.js which calls init) -->
-<script src="events.js?v=9"></script>
+<script src="events.js?v=10"></script>
 <script src="faces.js?v=7"></script>
 <script src="unknowns.js?v=7"></script>
 <script src="zones.js?v=7"></script>

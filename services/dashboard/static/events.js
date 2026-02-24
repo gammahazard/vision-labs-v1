@@ -176,12 +176,20 @@ function renderEvent(evt) {
             onerror="this.style.display='none'">`;
     }
 
+    // AI scene analysis (if available)
+    let aiHtml = "";
+    if (evt.ai_description) {
+        const desc = evt.ai_description.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        aiHtml = `<div class="event-ai-desc" style="font-size:11px; color:#a78bfa; margin-top:4px; font-style:italic; line-height:1.4; opacity:0.9;">🤖 ${desc}</div>`;
+    }
+
     item.innerHTML = `
         <span class="event-icon">${icon}</span>
         ${photoHtml}
         <div class="event-content">
             <div class="event-title">${title}</div>
             <div class="event-meta">${meta}</div>
+            ${aiHtml}
         </div>
     `;
 
@@ -254,6 +262,22 @@ function _openEventDetail(data) {
     if (nameInput) nameInput.value = "";
 
     modal.style.display = "flex";
+
+    // Fetch AI scene analysis for this event
+    const aiEl = document.getElementById("eventDetailAI");
+    if (aiEl) {
+        aiEl.style.display = "none";
+        aiEl.textContent = "";
+        fetch(`/api/events/${encodeURIComponent(data.eventId)}/analysis`)
+            .then(r => r.ok ? r.json() : null)
+            .then(d => {
+                if (d && d.description) {
+                    aiEl.textContent = `🤖 ${d.description}`;
+                    aiEl.style.display = "block";
+                }
+            })
+            .catch(() => { });
+    }
 }
 
 function closeEventDetailModal() {

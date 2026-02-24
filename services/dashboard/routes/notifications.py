@@ -28,8 +28,10 @@ SECURITY:
 """
 
 import os
+import io
 import json
 import time
+import base64
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
@@ -64,6 +66,10 @@ TELEGRAM_ALLOWED_USERS: set[int] = {
 
 # Timezone — from env (handles EST/EDT automatically via zoneinfo)
 TZ_LOCAL = ZoneInfo(os.getenv("LOCATION_TIMEZONE", "America/Toronto"))
+
+# Vision model config — for AI scene analysis on detection snapshots
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
+VISION_MODEL = os.getenv("VISION_MODEL", "minicpm-v")
 
 # Rate limiting — reads cooldown from Redis config, falls back to defaults
 _last_person_notification = 0.0
@@ -382,6 +388,80 @@ def draw_bbox_on_frame(frame_bytes: bytes, bbox_json: str,
         return frame_bytes
 
 
+# ---------------------------------------------------------------------------
+# AI Scene Analysis — vision model describes the snapshot
+# ---------------------------------------------------------------------------
+
+_PERSON_PROMPT = (
+    "You are a security camera analyst. Describe the person in this image "
+    "in 2-3 concise sentences. Include: clothing (color, type), apparent "
+    "gender, hair, accessories (bag, hat, etc.), posture, and direction of "
+    "movement if discernible. Note anything unusual or suspicious. "
+    "Be factual and brief — this goes into a Telegram alert caption."
+)
+
+_VEHICLE_PROMPT = (
+    "You are a security camera analyst. Describe the vehicle in this image "
+    "in 2-3 concise sentences. Include: vehicle type, color, make/model if "
+    "identifiable, any visible license plate text, and position relative to "
+    "the property. Note anything unusual. "
+    "Be factual and brief — this goes into a Telegram alert caption."
+)
+
+
+async def describe_scene(photo_bytes: bytes,
+                         prompt: str = _PERSON_PROMPT,
+                         timeout: float = 20.0) -> str:
+    """
+    Send a snapshot to the MiniCPM-V vision model via Ollama for analysis.
+
+    Returns a text description of the scene, or empty string on failure.
+    Runs the (blocking) Ollama call in a thread to avoid stalling the
+    asyncio event loop.
+
+    The vision model auto-loads into VRAM on first call and unloads after
+    its keep_alive window (default 5 min), so it doesn't compete with
+    Qwen 3 14B during idle periods.
+    """
+    def _call_vision_model() -> str:
+        try:
+            import ollama as ollama_lib
+            client = ollama_lib.Client(host=OLLAMA_HOST)
+            response = client.chat(
+                model=VISION_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": prompt,
+                    "images": [photo_bytes],
+                }],
+                options={"num_predict": 200},
+                keep_alive="5m",
+            )
+            text = response.message.content.strip()
+            # Strip any <think>...</think> tags from reasoning models
+            import re
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            return text
+        except Exception as e:
+            logger.warning(f"Vision model ({VISION_MODEL}) failed: {e}")
+            return ""
+
+    try:
+        description = await asyncio.wait_for(
+            asyncio.to_thread(_call_vision_model),
+            timeout=timeout,
+        )
+        if description:
+            logger.info(f"AI scene analysis ({len(description)} chars): {description[:80]}...")
+        return description
+    except asyncio.TimeoutError:
+        logger.warning(f"Vision model timed out after {timeout}s")
+        return ""
+    except Exception as e:
+        logger.warning(f"describe_scene error: {e}")
+        return ""
+
+
 async def send_video(video_bytes: bytes, caption: str = "",
                      chat_id: str = "") -> int:
     """
@@ -594,6 +674,21 @@ async def notify_person_detected(event_data: dict,
     # Use provided snapshot bytes, fall back to live frame
     frame = snapshot_bytes if snapshot_bytes else get_latest_frame()
     if frame:
+        # AI scene analysis — describe the person before sending
+        ai_desc = await describe_scene(frame, prompt=_PERSON_PROMPT)
+        if ai_desc:
+            caption += f"\n\n\U0001f916 <i>{ai_desc}</i>"
+            # Store description in Redis for dashboard/journal access
+            if event_id:
+                try:
+                    ctx.r.setex(
+                        f"scene_analysis:{event_id}",
+                        86400,  # 24h TTL
+                        ai_desc,
+                    )
+                except Exception:
+                    pass
+
         # Draw bbox highlight on the snapshot if available
         bbox_json = event_data.get("bbox", "")
         if bbox_json:
@@ -764,6 +859,21 @@ async def notify_vehicle_idle(event_data: dict,
     # Use provided snapshot bytes, fall back to live frame
     frame = snapshot_bytes if snapshot_bytes else get_latest_frame()
     if frame:
+        # AI scene analysis — describe the vehicle before sending
+        ai_desc = await describe_scene(frame, prompt=_VEHICLE_PROMPT)
+        if ai_desc:
+            caption += f"\n\n\U0001f916 <i>{ai_desc}</i>"
+            # Store description in Redis for dashboard/journal access
+            if event_id:
+                try:
+                    ctx.r.setex(
+                        f"scene_analysis:{event_id}",
+                        86400,  # 24h TTL
+                        ai_desc,
+                    )
+                except Exception:
+                    pass
+
         # Use snapshot_bbox (matches saved frame) when available
         bbox_json = event_data.get("snapshot_bbox", "") or event_data.get("bbox", "")
         if bbox_json:
