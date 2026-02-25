@@ -42,7 +42,7 @@ class FakeRedis:
     def __init__(self):
         self._hashes = {}   # key → {field: value}
         self._streams = {}  # key → [(id, data)]
-
+        self._keys = {}     # key → value (for get/set)
     # --- Hash ops ---
     def hset(self, name, key=None, value=None, mapping=None):
         if name not in self._hashes:
@@ -83,6 +83,16 @@ class FakeRedis:
         stream_id = f"{int(time.time() * 1000)}-{len(self._streams[name])}"
         self._streams[name].append((stream_id, fields))
         return stream_id
+
+    # --- Key ops ---
+    def get(self, name):
+        return self._keys.get(name)
+
+    def set(self, name, value):
+        self._keys[name] = value
+
+    def setex(self, name, ttl, value):
+        self._keys[name] = value
 
 
 # ---------------------------------------------------------------------------

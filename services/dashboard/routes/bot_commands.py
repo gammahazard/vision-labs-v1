@@ -186,6 +186,7 @@ async def poll_telegram_callbacks(feedback_db):
                     {"command": "night", "description": "Night override status"},
                     {"command": "faces", "description": "Enrolled faces list"},
                     {"command": "timelapse", "description": "Day timelapse [YYYY-MM-DD]"},
+                    {"command": "analyze", "description": "AI vision analysis of live frame"},
                     {"command": "help", "description": "List all commands"},
                 ]},
                 timeout=10,
@@ -315,6 +316,16 @@ async def poll_telegram_callbacks(feedback_db):
                         await _handle_command(cmd, chat_id=str(msg_chat_id),
                                               text=text, user_id=str(msg_user_id),
                                               username=msg_username)
+                    elif msg.get("photo"):
+                        # User sent a photo — analyze it with MiniCPM-V
+                        caption = msg.get("caption", "").strip()
+                        await _handle_photo(
+                            msg["photo"],
+                            chat_id=str(msg_chat_id),
+                            caption=caption,
+                            user_id=str(msg_user_id),
+                            username=msg_username,
+                        )
 
         except httpx.ReadTimeout:
             # Normal — long poll timed out with no updates
@@ -350,6 +361,7 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
         "/events": _cmd_events,
         "/ask": _cmd_ask,
         "/timelapse": _cmd_timelapse,
+        "/analyze": _cmd_analyze,
     }
     # Admin-only commands
     admin_handlers = {
@@ -397,19 +409,28 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
 # ---------------------------------------------------------------------------
 async def _cmd_snapshot(chat_id: str = "", user_id: str = "",
                         username: str = "", **kwargs):
-    """Send a live camera snapshot."""
+    """Send a live camera snapshot with AI scene description."""
     frame = get_latest_frame()
     if frame:
         # Save copy to per-user audit trail on QNAP
         _save_telegram_media(username, user_id, frame, "snapshot", ".jpg")
         await send_photo(frame, f"📸 Live snapshot — {_now_str()}", chat_id=chat_id)
+
+        # Run MiniCPM-V scene analysis in background
+        try:
+            from routes.notifications import describe_scene
+            desc = await describe_scene(frame, timeout=25.0)
+            if desc:
+                await send_text(f"👁️ <b>AI Analysis</b> <i>(MiniCPM-V)</i>\n\n{desc}", chat_id=chat_id)
+        except Exception as e:
+            logger.debug(f"Snapshot AI analysis failed: {e}")
     else:
         await send_text("⚠️ No camera frame available", chat_id=chat_id)
 
 
 async def _cmd_clip(chat_id: str = "", text: str = "",
                     user_id: str = "", username: str = "", **kwargs):
-    """Capture and send a video clip (5-40s, default 5)."""
+    """Capture and send a video clip (5-40s, default 5) with AI analysis."""
     # Parse optional duration from text: /clip 15
     duration = 5.0
     parts = text.split()
@@ -429,6 +450,18 @@ async def _cmd_clip(chat_id: str = "", text: str = "",
         # Save copy to per-user audit trail on QNAP
         _save_telegram_media(username, user_id, clip_bytes, "clip", ".mp4")
         await send_video(clip_bytes, f"🎬 {int(duration)}s clip — {_now_str()}", chat_id=chat_id)
+
+        # Extract frames from clip and analyze with MiniCPM-V
+        try:
+            frames = await loop.run_in_executor(
+                None, lambda: _extract_clip_frames(clip_bytes, max_frames=6)
+            )
+            if frames:
+                desc = await _describe_scene_multi(frames, timeout=45.0)
+                if desc:
+                    await send_text(f"👁️ <b>AI Clip Analysis</b> <i>(MiniCPM-V · {len(frames)} frames)</i>\n\n{desc}", chat_id=chat_id)
+        except Exception as e:
+            logger.debug(f"Clip AI analysis failed: {e}")
     else:
         await send_text("⚠️ Failed to capture clip — not enough frames", chat_id=chat_id)
 
@@ -551,8 +584,9 @@ async def _cmd_help(chat_id: str = ""):
     """Send list of available commands."""
     await send_text(
         "🤖 <b>Vision Labs Bot</b>\n\n"
-        "/snapshot — 📸 Live camera photo\n"
-        "/clip [5-40] — 🎬 Video clip (default 5s)\n"
+        "/snapshot — 📸 Live photo + AI analysis\n"
+        "/clip [5-40] — 🎬 Video clip + AI analysis\n"
+        "/analyze — 👁️ AI vision analysis of live frame\n"
         "/status — 📊 System health\n"
         "/who — 👁️ Who's in frame now\n"
         "/events [1-20] — 📋 Recent detections\n"
@@ -562,11 +596,205 @@ async def _cmd_help(chat_id: str = ""):
         "/faces — 👤 Enrolled faces\n"
         "/timelapse [YYYY-MM-DD] — ⏩ Timelapse from snapshots\n"
         "/ask [question] — 🧠 Ask the AI assistant\n\n"
+        "📷 <b>Send a photo</b> to get AI vision analysis\n\n"
         "🔒 <b>Admin Only</b>\n"
         "/arm — 🟢 Enable notifications\n"
         "/disarm — 🔴 Disable notifications",
         chat_id=chat_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Vision analysis helpers — MiniCPM-V integration
+# ---------------------------------------------------------------------------
+def _extract_clip_frames(mp4_bytes: bytes, max_frames: int = 6) -> list[bytes]:
+    """Extract evenly-spaced frames from an MP4 clip as JPEG bytes."""
+    import tempfile
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp_path = tmp.name
+    try:
+        tmp.write(mp4_bytes)
+        tmp.close()
+
+        cap = cv2.VideoCapture(tmp_path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total < 1:
+            cap.release()
+            return []
+
+        # Pick evenly-spaced frame indices
+        n = min(max_frames, total)
+        indices = [int(i * (total - 1) / max(n - 1, 1)) for i in range(n)]
+
+        frames = []
+        for idx in sorted(set(indices)):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if ret:
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                frames.append(buf.tobytes())
+
+        cap.release()
+        return frames
+    except Exception:
+        return []
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+async def _describe_scene_multi(frames: list[bytes],
+                                prompt: str = "",
+                                timeout: float = 45.0) -> str:
+    """Send multiple frames to MiniCPM-V for analysis. Returns description."""
+    import re as _re
+
+    if not prompt:
+        prompt = (
+            "These are frames from a security camera video clip. "
+            "Describe what is happening across the clip: any people, their actions, "
+            "vehicles, changes between frames, and anything notable."
+        )
+
+    def _call_vision_multi() -> str:
+        try:
+            import ollama as ollama_lib
+            OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
+            VISION_MODEL = os.getenv("VISION_MODEL", "minicpm-v")
+            client = ollama_lib.Client(host=OLLAMA_HOST)
+            response = client.chat(
+                model=VISION_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": prompt,
+                    "images": frames,
+                }],
+                options={"num_predict": 300},
+                keep_alive="24h",
+            )
+            text = response.message.content.strip()
+            text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
+            return text
+        except Exception as e:
+            logger.warning(f"Multi-frame vision analysis failed: {e}")
+            return ""
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_call_vision_multi),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"Multi-frame vision timed out after {timeout}s")
+        return ""
+    except Exception as e:
+        logger.warning(f"_describe_scene_multi error: {e}")
+        return ""
+
+
+async def _handle_photo(photo_list: list, chat_id: str = "",
+                        caption: str = "", user_id: str = "",
+                        username: str = ""):
+    """Download a user-sent photo and analyze it with MiniCPM-V."""
+    from routes.notifications import describe_scene
+
+    try:
+        _log_telegram_command(username, user_id, f"(photo) {caption}" if caption else "(photo)")
+
+        # Telegram sends multiple sizes — pick the largest
+        photo = photo_list[-1] if photo_list else None
+        if not photo:
+            await send_text("⚠️ Could not read photo", chat_id=chat_id)
+            return
+
+        file_id = photo.get("file_id", "")
+        if not file_id:
+            await send_text("⚠️ No file_id in photo", chat_id=chat_id)
+            return
+
+        await send_text("👁️ Analyzing your photo...", chat_id=chat_id)
+
+        # Download the photo from Telegram
+        async with httpx.AsyncClient() as client:
+            # Get file path
+            file_resp = await client.get(
+                f"{TELEGRAM_API}/getFile",
+                params={"file_id": file_id},
+                timeout=10,
+            )
+            if file_resp.status_code != 200:
+                await send_text("⚠️ Failed to download photo from Telegram", chat_id=chat_id)
+                return
+
+            file_path = file_resp.json().get("result", {}).get("file_path", "")
+            if not file_path:
+                await send_text("⚠️ Could not get file path", chat_id=chat_id)
+                return
+
+            # Download actual file bytes
+            bot_token = TELEGRAM_API.split("/bot")[1].split("/")[0] if "/bot" in TELEGRAM_API else ""
+            download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+            dl_resp = await client.get(download_url, timeout=15)
+            if dl_resp.status_code != 200:
+                await send_text("⚠️ Failed to download photo", chat_id=chat_id)
+                return
+
+            photo_bytes = dl_resp.content
+
+        # Save to audit trail
+        _save_telegram_media(username, user_id, photo_bytes, "snapshot", ".jpg")
+
+        # Analyze with MiniCPM-V
+        prompt = caption if caption else (
+            "Describe this image in detail. Include any people, objects, "
+            "text, activities, and notable details."
+        )
+        desc = await describe_scene(photo_bytes, prompt=prompt, timeout=30.0)
+
+        if desc:
+            await send_text(f"👁️ <b>Vision Analysis</b> <i>(MiniCPM-V)</i>\n\n{desc}", chat_id=chat_id)
+        else:
+            await send_text("⚠️ Vision model could not analyze this photo (timeout or error)", chat_id=chat_id)
+
+    except Exception as e:
+        logger.warning(f"Photo analysis failed: {e}")
+        await send_text(f"⚠️ Photo analysis failed: {e}", chat_id=chat_id)
+
+
+async def _cmd_analyze(chat_id: str = "", text: str = "",
+                       user_id: str = "", username: str = "", **kwargs):
+    """Analyze the live camera frame with MiniCPM-V vision model."""
+    from routes.notifications import describe_scene
+
+    frame = get_latest_frame()
+    if not frame:
+        await send_text("⚠️ No camera frame available", chat_id=chat_id)
+        return
+
+    await send_text("👁️ Analyzing live frame...", chat_id=chat_id)
+
+    # Use text after /analyze as custom prompt, otherwise default
+    custom_prompt = text.replace("/analyze", "", 1).strip() if text else ""
+    prompt = custom_prompt or (
+        "Describe this security camera image in detail. "
+        "Include: lighting/time of day, weather if visible, "
+        "any people (count, appearance, actions), vehicles, "
+        "and anything notable or unusual."
+    )
+
+    try:
+        desc = await describe_scene(frame, prompt=prompt, timeout=30.0)
+        if desc:
+            # Also send the snapshot so they can see what was analyzed
+            await send_photo(frame, f"📸 Live frame — {_now_str()}", chat_id=chat_id)
+            await send_text(f"👁️ <b>AI Vision Analysis</b> <i>(MiniCPM-V)</i>\n\n{desc}", chat_id=chat_id)
+        else:
+            await send_text("⚠️ Vision model timed out or returned empty", chat_id=chat_id)
+    except Exception as e:
+        await send_text(f"⚠️ Analysis failed: {e}", chat_id=chat_id)
 
 
 # Snapshot directory — same as server.py uses

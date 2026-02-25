@@ -1,9 +1,9 @@
-# docker-compose.yml — Vision Labs (Phases 0-7)
+# docker-compose.yml — Vision Labs (Phases 0-12)
 #
 # PURPOSE:
 #   Runs the full Vision Labs stack on a single PC (RTX 3090):
 #   Redis, camera ingester, YOLO pose detector, vehicle detector, tracker,
-#   face recognizer, dashboard, and Ollama (local LLM).
+#   face recognizer, dashboard, Ollama (local LLM), ComfyUI, recorder, and piper TTS.
 #
 # USAGE:
 #   docker compose up --build          # Start everything (first time)
@@ -224,6 +224,52 @@ services:
       start_period: 30s
 
   # ---------------------------------------------------------------------------
+  # ComfyUI — Local image generation (Stable Diffusion, Flux, etc.)
+  # ---------------------------------------------------------------------------
+  # Runs ComfyUI with GPU access for on-demand image/video generation.
+  # Drop .safetensors files into ./models/comfyui/checkpoints/ to add models.
+  # Dashboard proxies requests to http://comfyui:8188.
+  comfyui:
+    build:
+      context: ./services/comfyui
+    volumes:
+      - comfyui-data:/app/output
+      - ./models/comfyui:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8188/system_stats')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Piper TTS — Local text-to-speech for video narration
+  # ---------------------------------------------------------------------------
+  # Lightweight TTS engine with natural-sounding voices.
+  # HTTP API at http://piper:10200 for the dashboard video pipeline.
+  piper:
+    image: rhasspy/wyoming-piper
+    command: --voice en_US-lessac-medium
+    volumes:
+      - piper-data:/data
+    ports:
+      - "10200:10200"
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',10200),2); s.close()" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
   # Dashboard — Live monitoring UI
   # ---------------------------------------------------------------------------
   # Web dashboard accessible at http://localhost:8080. Shows live camera feed
@@ -240,6 +286,9 @@ services:
       - qnap-snapshots:/data/snapshots
       - qnap-events:/data/events
       - qnap-telegram:/data/telegram
+      - qnap-generations:/data/generations
+      - comfyui-data:/data/comfyui-output:ro
+      - qnap-videos:/data/videos
     environment:
       - CAMERA_ID=front_door
       - REDIS_HOST=redis
@@ -248,6 +297,8 @@ services:
       - FACE_API_URL=http://face-recognizer:8081
       - AUTH_DB_PATH=/data/auth.db
       - OLLAMA_HOST=http://ollama:11434
+      - COMFYUI_HOST=http://comfyui:8188
+      - PIPER_HOST=http://piper:10200
       - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
@@ -293,6 +344,8 @@ volumes:
   insightface-models:
   auth-data:
   ollama-models:
+  comfyui-data:
+  piper-data:
   qnap-snapshots:
     driver: local
     driver_opts:
@@ -316,4 +369,16 @@ volumes:
     driver_opts:
       type: cifs
       device: //${QNAP_IP}/vision-labs/telegram
+      o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"
+  qnap-generations:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //${QNAP_IP}/vision-labs/generations
+      o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"
+  qnap-videos:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //${QNAP_IP}/vision-labs/videos
       o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"

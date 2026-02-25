@@ -54,6 +54,7 @@ from streams import (
     ZONE_KEY as _ZONE_TMPL,
     HD_FRAME_KEY as _HD_TMPL,
     VEHICLE_STREAM as _VEH_DET_TMPL,
+    DETECTION_FRAME_KEY as _DET_FRAME_TMPL,
     TELEGRAM_USERS_KEY as _TG_USERS_KEY,
     TELEGRAM_ACCESS_LOG as _TG_ACCESS_LOG,
     stream_key,
@@ -124,6 +125,7 @@ IDENTITY_KEY = stream_key(_IDKEY_TMPL, camera_id=CAMERA_ID)
 ZONE_KEY = stream_key(_ZONE_TMPL, camera_id=CAMERA_ID)
 HD_FRAME_KEY = stream_key(_HD_TMPL, camera_id=CAMERA_ID)
 VEHICLE_DET_STREAM = stream_key(_VEH_DET_TMPL, camera_id=CAMERA_ID)
+DETECTION_FRAME_POSE = stream_key(_DET_FRAME_TMPL, detector_type="pose", camera_id=CAMERA_ID)
 
 # Default config values (written to Redis on first startup if not present)
 DEFAULT_CONFIG = {
@@ -204,6 +206,8 @@ from routes.browse import router as browse_router
 from routes.feedback import router as feedback_router, set_feedback_db
 from routes.ai import router as ai_router, set_ai_db, set_feedback_db as ai_set_feedback_db, set_gpu_ready_flag
 from routes.telegram_access import router as telegram_access_router
+from routes.image_gen import router as image_gen_router
+from routes.video_pipeline import router as video_pipeline_router
 
 app.include_router(events_router)
 app.include_router(config_router)
@@ -217,6 +221,8 @@ app.include_router(browse_router)
 app.include_router(feedback_router)
 app.include_router(ai_router)
 app.include_router(telegram_access_router)
+app.include_router(image_gen_router)
+app.include_router(video_pipeline_router)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +344,9 @@ async def startup():
     # Pass a callback so the warm-up can signal when the model is in GPU memory
     asyncio.create_task(_ensure_ollama_model())
 
+    # Clear stale ComfyUI queue and GPU pause flag from previous session
+    asyncio.create_task(_clear_comfyui_queue_on_startup())
+
     logger.info(f"Dashboard ready at http://localhost:{DASHBOARD_PORT}")
 
 
@@ -442,6 +451,43 @@ async def _ensure_ollama_model():
     except Exception as e:
         logger.warning(f"Failed to pull AI model: {e} (AI chat will be unavailable until model is pulled)")
 
+
+async def _clear_comfyui_queue_on_startup():
+    """Clear any stale ComfyUI queue items and GPU pause flag from previous session."""
+    import httpx
+    comfyui_host = os.environ.get("COMFYUI_HOST", "http://comfyui:8188")
+    # Wait up to 60s for ComfyUI to come online
+    for attempt in range(12):
+        try:
+            async with httpx.AsyncClient() as client:
+                # Interrupt any running job
+                await client.post(f"{comfyui_host}/interrupt", timeout=5)
+                # Clear pending queue
+                queue_resp = await client.get(f"{comfyui_host}/queue", timeout=5)
+                if queue_resp.status_code == 200:
+                    queue_data = queue_resp.json()
+                    pending = queue_data.get("queue_pending", [])
+                    if pending:
+                        pending_ids = [item[1] for item in pending if len(item) > 1]
+                        if pending_ids:
+                            await client.post(
+                                f"{comfyui_host}/queue",
+                                json={"delete": pending_ids},
+                                timeout=5,
+                            )
+                            logger.info(f"Startup: cleared {len(pending_ids)} stale ComfyUI queue items")
+                    else:
+                        logger.info("Startup: ComfyUI queue is clean")
+            # Clear GPU pause flag from Redis
+            try:
+                r.delete("gpu:generation_active")
+                logger.info("Startup: cleared GPU pause flag")
+            except Exception:
+                pass
+            return
+        except Exception:
+            await asyncio.sleep(5)
+    logger.warning("Startup: ComfyUI not reachable after 60s — skipping queue cleanup")
 
 async def _event_notification_poller():
     """
@@ -801,16 +847,6 @@ async def websocket_live(ws: WebSocket):
 
                 # === SD MODE: normal frame with detection overlays ===
 
-                # Get the latest frame from the stream
-                frames = r_bin.xrevrange(FRAME_STREAM, count=1)
-                if not frames:
-                    await asyncio.sleep(0.1)
-                    continue
-
-                frame_id, frame_data = frames[0]
-                frame_bytes = frame_data[b"frame"]
-                frame_number = frame_data.get(b"frame_number", b"0").decode()
-
                 # Get the latest detection
                 detections_raw = r_bin.xrevrange(
                     DETECTION_STREAM.encode(), count=1
@@ -822,6 +858,17 @@ async def websocket_live(ws: WebSocket):
                     det_json = det_data.get(b"detections", b"[]").decode()
                     detections = json.loads(det_json)
                     inference_ms = det_data.get(b"inference_ms", b"0").decode()
+
+                # Read the exact frame the detector processed (synced with bboxes)
+                frame_bytes = r_bin.get(DETECTION_FRAME_POSE.encode())
+                if not frame_bytes:
+                    # Fallback: no detection frame yet (startup), use latest from stream
+                    frames = r_bin.xrevrange(FRAME_STREAM, count=1)
+                    if not frames:
+                        await asyncio.sleep(0.1)
+                        continue
+                    frame_bytes = frames[0][1][b"frame"]
+                frame_number = "0"  # Not tracked for synced frames
 
                 # Decode the JPEG frame to draw overlays
                 np_arr = np.frombuffer(frame_bytes, np.uint8)

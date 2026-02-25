@@ -34,3 +34,17 @@ gpu_test.txt
 
 # Snapshots
 snapshots/
+
+# Models & weights (multi-GB files)
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# Temp / debug files
+test_output.txt
+test_counts.txt
+line_counts.txt

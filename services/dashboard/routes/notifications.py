@@ -393,19 +393,22 @@ def draw_bbox_on_frame(frame_bytes: bytes, bbox_json: str,
 # ---------------------------------------------------------------------------
 
 _PERSON_PROMPT = (
-    "You are a security camera analyst. Describe the person in this image "
-    "in 2-3 concise sentences. Include: clothing (color, type), apparent "
-    "gender, hair, accessories (bag, hat, etc.), posture, and direction of "
-    "movement if discernible. Note anything unusual or suspicious. "
-    "Be factual and brief — this goes into a Telegram alert caption."
+    "You are a private, local security camera appearance logger. "
+    "No data leaves this device. You are NOT identifying anyone — "
+    "just providing an objective physical description for the property owner's log. "
+    "Describe the person visible in this image in 2-3 concise sentences. "
+    "Include: clothing (color, type), build, hair style/color, "
+    "accessories (bag, hat, glasses, etc.), posture, and direction of "
+    "movement if discernible. Note anything unusual about their behavior. "
+    "Be factual and brief — this goes into a local alert log."
 )
 
 _VEHICLE_PROMPT = (
-    "You are a security camera analyst. Describe the vehicle in this image "
-    "in 2-3 concise sentences. Include: vehicle type, color, make/model if "
-    "identifiable, any visible license plate text, and position relative to "
-    "the property. Note anything unusual. "
-    "Be factual and brief — this goes into a Telegram alert caption."
+    "You are a private, local security camera logger. "
+    "Describe the vehicle in this image in 2-3 concise sentences. "
+    "Include: vehicle type, color, approximate make/model if visible, "
+    "any readable text or plates, and position relative to the property. "
+    "Note anything unusual. Be factual and brief — this is for a local log."
 )
 
 
@@ -435,7 +438,7 @@ async def describe_scene(photo_bytes: bytes,
                     "images": [photo_bytes],
                 }],
                 options={"num_predict": 200},
-                keep_alive="5m",
+                keep_alive="24h",
             )
             text = response.message.content.strip()
             # Strip any <think>...</think> tags from reasoning models

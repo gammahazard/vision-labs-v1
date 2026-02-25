@@ -24,3 +24,12 @@ astral==3.2
 
 # Ollama client for local LLM (AI assistant)
 ollama>=0.4.0
+
+# Multipart form parsing (required for file uploads / img2img)
+python-multipart>=0.0.6
+
+# Image processing for PNG metadata embedding
+Pillow>=10.0.0
+
+# Wyoming protocol (for Piper TTS communication)
+wyoming>=1.5.0

@@ -46,6 +46,8 @@ from streams import (
     FRAME_STREAM as _FRAME_TMPL,
     DETECTION_STREAM as _DET_TMPL,
     CONFIG_KEY as _CFG_TMPL,
+    DETECTION_FRAME_KEY as _DET_FRAME_TMPL,
+    GPU_PAUSE_KEY,
     stream_key,
 )
 
@@ -65,6 +67,7 @@ CONSUMER_NAME = os.getenv("CONSUMER_NAME", "vdetector_1")
 FRAME_STREAM = stream_key(_FRAME_TMPL, camera_id=CAMERA_ID)
 DETECTION_STREAM = stream_key(_DET_TMPL, detector_type="vehicle", camera_id=CAMERA_ID)
 CONFIG_KEY = stream_key(_CFG_TMPL, camera_id=CAMERA_ID)
+DETECTION_FRAME = stream_key(_DET_FRAME_TMPL, detector_type="vehicle", camera_id=CAMERA_ID)
 
 # Max detections to keep in the output stream
 MAX_DETECTION_STREAM_LEN = 1000
@@ -194,6 +197,20 @@ def run():
 
     while not _shutdown:
         try:
+            # --- GPU pause: skip inference while image/video generation is active ---
+            try:
+                if r.exists(GPU_PAUSE_KEY):
+                    if not getattr(run, '_paused_logged', False):
+                        logger.info("GPU generation active — pausing inference...")
+                        run._paused_logged = True
+                    time.sleep(2)
+                    continue
+                elif getattr(run, '_paused_logged', False):
+                    logger.info("GPU generation finished — resuming inference")
+                    run._paused_logged = False
+            except redis.ConnectionError:
+                pass
+
             # Read next frame from stream via consumer group
             messages = r.xreadgroup(
                 CONSUMER_GROUP,
@@ -299,6 +316,10 @@ def run():
                         maxlen=MAX_DETECTION_STREAM_LEN,
                         approximate=True,
                     )
+
+                    # Cache the source frame so the dashboard can draw bboxes on
+                    # the exact frame they were computed from (prevents drift)
+                    r.set(DETECTION_FRAME, frame_bytes)
 
                     # Acknowledge the frame
                     r.xack(FRAME_STREAM, CONSUMER_GROUP, msg_id)

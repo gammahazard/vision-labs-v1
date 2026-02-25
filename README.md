@@ -2,7 +2,7 @@
 
 > **Real hardware. Real-time inference. Self-learning alerts.**
 
-An event-driven, microservices-based security camera system that detects people, tracks them across frames, recognizes known faces, and learns which alerts matter to you over time. Continuous DVR recording to a QNAP NAS with 28-day rolling retention. Runs entirely on a single PC with a GPU, orchestrated via Docker Compose.
+An event-driven, microservices-based security camera system that detects people, tracks them across frames, recognizes known faces, and learns which alerts matter to you over time. Continuous DVR recording to a QNAP NAS with 28-day rolling retention. Includes AI-powered image generation, video production, and vision analysis. Runs entirely on a single PC with a GPU, orchestrated via Docker Compose.
 
 ---
 
@@ -19,7 +19,10 @@ An event-driven, microservices-based security camera system that detects people,
 | **Telegram notifications** | Real-time photo alerts broadcast to all approved users, per-user bot commands, dashboard-managed access control |
 | **Vehicle detection** | YOLOv8s detects cars, trucks, buses, motorcycles — snapshot + event feed |
 | **Self-learning** | User feedback trains suppression rules — fewer false alarms over time |
-| **AI assistant** | Local Qwen 3 14B via Ollama — 21 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules, activity heatmaps, record verdicts conversationally, show enrolled face photos |
+| **AI assistant** | Local Qwen 3 14B via Ollama — 22 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules, activity heatmaps, record verdicts conversationally, show enrolled face photos, AI vision analysis |
+| **Image generation** | Stable Diffusion via ComfyUI — txt2img/img2img, LoRA support, batch generation, parameter sweeps with per-combo batch count, gallery with lightbox navigation, prompt history, creative chat (Dolphin model) |
+| **Video production** | AnimateDiff pipeline — AI script generation (Ollama), per-scene animation with character face conditioning (IPAdapter), TTS narration (Piper), ffmpeg assembly, video history with delete |
+| **Vision analysis** | MiniCPM-V multimodal model via Ollama — describe camera snapshots, analyze uploaded images/videos |
 
 ---
 
@@ -34,13 +37,14 @@ Ingester --> Redis Streams --> YOLO Pose Detector --> Tracker --> Events
                            --> InsightFace --> Face Identity
                            --> Dashboard (WebSocket --> Browser)
                            --> Telegram Notifications
-                           --> Ollama (Qwen 3 14B) --> AI Chat
-    |
+                           --> Ollama (Qwen 3 14B) --> AI Chat / Vision / Script
+    |                      --> ComfyUI (Stable Diffusion) --> Image Gen / AnimateDiff
+    |                      --> Piper (TTS) --> Video Narration
     v
 Recorder --> ffmpeg (copy) --> QNAP NAS (MPEG-TS segments, 28-day rolling)
 ```
 
-Nine containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment).
+Eleven containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment, dashboard -> ComfyUI API for image/video generation, and dashboard -> Piper for TTS).
 
 | Service | Purpose | GPU? |
 |---------|---------|------|
@@ -51,7 +55,9 @@ Nine containerized services communicate through Redis Streams -- no direct inter
 | **vehicle-detector** | YOLOv8s vehicle detection (car/truck/bus/motorcycle) | Yes |
 | **face-recognizer** | InsightFace embedding + enrollment API | Yes |
 | **dashboard** | FastAPI + WebSocket + static frontend | No |
-| **ollama** | Local LLM inference (Qwen 3 14B) | Yes |
+| **ollama** | Local LLM inference (Qwen 3 14B + Dolphin Mistral Nemo 12B + MiniCPM-V 2.6) | Yes |
+| **comfyui** | Stable Diffusion inference (SDXL + AnimateDiff) | Yes |
+| **piper** | Local text-to-speech (Wyoming protocol) | No |
 | **recorder** | Continuous DVR recording to QNAP NAS (ffmpeg) | No |
 
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive -- service internals, Redis key map, data flow diagrams, and design decisions.
@@ -116,6 +122,10 @@ docker compose up -d --build
 | `LOCATION_LAT` | No | Latitude for sunrise/sunset calculations |
 | `LOCATION_LON` | No | Longitude for sunrise/sunset calculations |
 | `LOCATION_TIMEZONE` | No | IANA timezone (default: `America/Toronto`) |
+| `QNAP_IP` | No | QNAP NAS IP address for CIFS volume mounts |
+| `QNAP_USER` | No | QNAP NAS login username |
+| `QNAP_PASSWORD` | No | QNAP NAS login password |
+| `COMFYUI_URL` | No | ComfyUI API endpoint for image/video generation |
 
 ---
 
@@ -125,7 +135,7 @@ The web dashboard is accessible from any device on your LAN at port 8080. No app
 
 ### Features
 
-- **Live camera feed** -- real-time JPEG streaming via WebSocket with detection overlays
+- **Live camera feed** -- real-time JPEG streaming via WebSocket with detection overlays, HD/SD stream toggle
 - **Bounding boxes** -- green for unknown, cyan for identified people, orange for vehicles, with action labels
 - **Keypoint overlay** -- 17-point COCO pose skeleton rendered on each person
 - **Event feed** -- scrolling list of detection events with inline face photo thumbnails
@@ -133,6 +143,9 @@ The web dashboard is accessible from any device on your LAN at port 8080. No app
 - **Face enrollment wizard** -- guided multi-angle capture (front, left, right, up, down) with live oval face guide
 - **Telegram Access Manager** -- approve/revoke bot users from dashboard, access audit log, one-click enrollment from denied attempts
 - **Unknown faces gallery** -- auto-captured unknowns with one-click label/dismiss
+- **AI image generation** -- txt2img/img2img via ComfyUI, LoRA support, batch generation, gallery with lightbox + arrow navigation
+- **AI video production** -- script generation → scene animation → TTS narration → ffmpeg assembly, per-scene image attachment
+- **AI vision analysis** -- MiniCPM-V multimodal model for scene description, image/video analysis via chat
 - **Conditions panel** -- current time period (daytime/twilight/night), sunrise/sunset, live weather
 - **Settings** -- adjustable confidence, IoU threshold, lost timeout -- all hot-reload, no container restart needed
 - **Notifications** -- Telegram integration status and test button
@@ -266,26 +279,33 @@ Suppression is checked **before** the rate-limit timer — suppressed events don
 | Phase 6.1 | Dashboard authentication (login, sessions, password change) | Done |
 | Phase 6.2 | Vehicle detection (car/truck/bus/motorcycle) + event feed | Done |
 | Phase 6.5 | Self-learning feedback loop (Telegram buttons, review queue, suppression rules) | Done |
-| Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 21 tools | Done |
+| Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 22 tools | Done |
 | Phase 7.5 | Telegram Access Manager -- per-user auth, enrollment flow, access log, dashboard page | Done |
-| Phase 8 | Extended bot commands + AI tools -- /zones, /rules, /night, /faces, /timelapse, activity heatmap, record_verdict, show_faces | Done |
+| Phase 8 | Extended bot commands + AI tools -- /zones, /rules, /night, /faces, /timelapse, /analyze, photo analysis, activity heatmap, record_verdict, show_faces, analyze_image | Done |
 | Phase 9 | QNAP NAS storage -- DVR recording, event journal, Telegram audit trail | Done |
+| Phase 10 | AI image generation -- ComfyUI + SDXL, txt2img/img2img, LoRA, batch generation, gallery | Done |
+| Phase 11 | AI vision analysis -- MiniCPM-V 2.6 multimodal model, image/video description in chat | Done |
+| Phase 12 | AI video production -- AnimateDiff pipeline, script generation, TTS narration (Piper), ffmpeg assembly | Done |
 
 ### Phase 7: AI Assistant
 
 A local Qwen 3 14B model (via Ollama, ~9.3 GB) adds natural language capabilities:
 - **Chat interface** -- dark-themed UI with onboarding wizard, suggestion chips, markdown + inline image rendering
-- **21 tools** -- query events/events by date/patterns/activity heatmap, faces/unknowns/show face photos, live scene, capture snapshot (with weather + scene description), capture 5-second video clip in chat, get weather, browse vehicles, zones, notification history, feedback stats, review feedback, retrain rules, send Telegram (text/snapshot/clip), schedule reminders, system status, record verdicts conversationally
+- **22 tools** -- query events/events by date/patterns/activity heatmap, faces/unknowns/show face photos, live scene, capture snapshot (with weather + scene description), capture 5-second video clip in chat, get weather, browse vehicles, zones, notification history, feedback stats, review feedback, retrain rules, send Telegram (text/snapshot/clip), schedule reminders, system status, record verdicts conversationally, analyze image (MiniCPM-V)
+- **Creative chat** -- Dolphin Mistral Nemo 12B model for uncensored creative text generation (prompt refinement, storytelling)
+- **VRAM management** -- auto-unload Ollama models before image/video generation, GPU pause flag pauses pose/vehicle detectors during generation to prevent CUDA conflicts
 - **Runs entirely on-device** -- no cloud APIs, no data leaves the machine
 - **Extensibility roadmap** -- see ARCHITECTURE.md for 3-tier plan (smarter context → proactive intelligence → autonomous operation)
 
 ### Phase 8: Extended Bot Commands & AI Tools
 
 Expanded Telegram bot and AI assistant capabilities:
-- **6 new bot commands** -- `/zones` (snapshot with zone overlays), `/rules` (suppression rules + stats), `/night` (night override status), `/faces` (enrolled people), `/timelapse [YYYY-MM-DD]` (MP4 from day's snapshots), `/events` (with snapshot thumbnails)
-- **3 new AI tools** -- `query_activity_heatmap` (day×hour cross-tabulation), `record_verdict` (conversational event classification), `show_faces` (display enrolled photos in chat)
+- **8 new bot commands** -- `/zones` (snapshot with zone overlays), `/rules` (suppression rules + stats), `/night` (night override status), `/faces` (enrolled people), `/timelapse [YYYY-MM-DD]` (MP4 from day's snapshots), `/events` (with snapshot thumbnails), `/analyze` (AI vision analysis of live frame), `/ask` (ask AI assistant from Telegram)
+- **Photo analysis** -- send any photo to the bot and get AI vision analysis via MiniCPM-V
+- **4 new AI tools** -- `query_activity_heatmap` (day×hour cross-tabulation), `record_verdict` (conversational event classification), `show_faces` (display enrolled photos in chat), `analyze_image` (vision analysis)
 - **Night override awareness** -- `/night` command shows current period and active override status
 - **AI learning loop** -- `record_verdict` allows conversational feedback ("mark that as false alarm") while keeping the AI read-only on rule modification
+- **GPU pause coordination** -- image/video generation sets a Redis flag (`gpu:generation_active`) that pauses pose and vehicle detector inference, preventing CUDA memory conflicts
 
 ### QNAP NAS Storage (Phase 9)
 
@@ -340,10 +360,14 @@ The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-st
 | Frontend | Vanilla HTML/JS/CSS + WebSocket | Lightweight, no build step |
 | Pose detection | YOLOv8s-pose (Ultralytics) | Keypoints + bounding box in one model |
 | Face recognition | InsightFace buffalo_l | 512-dim embeddings, cosine matching |
+| Image generation | Stable Diffusion XL via ComfyUI | txt2img/img2img, LoRA, AnimateDiff |
+| Video animation | AnimateDiff (SDXL motion model) | Image-to-video scene animation |
+| Vision model | MiniCPM-V 2.6 via Ollama | Multimodal image/video understanding |
+| Text-to-speech | Piper (Wyoming protocol) | Local TTS for video narration |
 | Time rules | astral | Sunrise/sunset from coordinates, no internet |
 | Database | SQLite (faces + auth) | Embedded, zero-config |
 | Containers | Docker Compose | One service per container |
-| GPU runtime | NVIDIA Container Toolkit + CUDA 11.8 + cuDNN 8 | Required for ONNX Runtime GPU acceleration |
+| GPU runtime | NVIDIA Container Toolkit + CUDA 12.1 | Required for PyTorch + ONNX Runtime GPU acceleration |
 
 ### GPU Memory Budget
 
@@ -353,9 +377,14 @@ The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-st
 | YOLOv8s (vehicles) | ~500 MB |
 | InsightFace buffalo_l | ~600 MB |
 | Qwen 3 14B (Ollama) | ~9,300 MB |
-| **Current total** | **~10.9 GB** |
+| Dolphin Mistral Nemo 12B (Ollama) | ~7,500 MB |
+| MiniCPM-V 2.6 (Ollama) | ~5,500 MB |
+| Stable Diffusion XL (ComfyUI) | ~6,500 MB |
+| AnimateDiff motion model | ~1,700 MB |
+| IPAdapter face model | ~1,500 MB |
+| **Max theoretical** | **~34.1 GB** |
 
-Fits on any 12GB+ NVIDIA GPU. The RTX 3090 (24 GB) has ~13 GB headroom.
+> **Note:** Not all models run simultaneously. Ollama swaps models on demand (only one of Qwen 3 / MiniCPM-V / Dolphin loaded at a time). ComfyUI loads SDXL only during generation; IPAdapter and AnimateDiff load only during video production. GPU services (pose/vehicle detectors) automatically pause inference during image/video generation via a Redis `GPU_PAUSE_KEY` flag, preventing CUDA memory conflicts. Realistic peak during video generation: ~11 GB (SDXL + AnimateDiff + IPAdapter).
 
 ---
 
@@ -364,7 +393,7 @@ Fits on any 12GB+ NVIDIA GPU. The RTX 3090 (24 GB) has ~13 GB headroom.
 ```
 vision-labs/
 |-- .env.example                  # Environment template (copy to .env)
-|-- docker-compose.yml            # All 9 services orchestrated
+|-- docker-compose.yml            # All 11 services orchestrated
 |-- ARCHITECTURE.md               # Full technical deep dive
 |-- v2.md                         # Phased build plan with design rationale
 |
@@ -381,16 +410,17 @@ vision-labs/
 |   |-- face-recognizer/          # InsightFace + enrollment REST API (GPU)
 |   |-- vehicle-detector/         # YOLOv8s vehicle detection (GPU)
 |   |-- recorder/                 # DVR recording to QNAP NAS (ffmpeg)
+|   |-- comfyui/                  # Stable Diffusion XL + AnimateDiff (GPU)
 |   +-- dashboard/                # FastAPI backend + static frontend
-|       |-- server.py             # App factory, WebSocket handler, middleware
-|       |-- feedback_db.py        # Feedback + suppression rules (SQLite)
-|       |-- ai_db.py              # AI config + reminders + chat history (SQLite)
-|       |-- routes/               # Modular API endpoints (events, faces, zones, auth, feedback, ai, telegram)
+|       |-- server.py             # App factory, WebSocket handler, middleware (~1025 lines)
+|       |-- feedback_db.py        # Feedback + suppression rules (SQLite, ~521 lines)
+|       |-- ai_db.py              # AI config + reminders + chat history (SQLite, ~209 lines)
+|       |-- routes/               # Modular API endpoints (events, faces, zones, auth, feedback, ai, telegram, image_gen, video_pipeline)
 |       +-- static/               # HTML/JS/CSS (no build step, no framework)
-|           |-- index.html         # Dashboard (live feed, sidebar panels)
-|           |-- ai.html            # AI assistant (onboarding wizard + chat)
-|           |-- telegram.html      # Telegram Access Manager (users + access log)
-|           +-- login.html         # Authentication page
+|           |-- index.html         # Dashboard (live feed, sidebar panels, ~554 lines)
+|           |-- ai.html            # AI assistant + image gen + vision + video (~618 lines)
+|           |-- telegram.html      # Telegram Access Manager (users + access log, ~290 lines)
+|           +-- login.html         # Authentication page (~877 lines)
 |
 +-- tests/                        # Unit + integration tests (no GPU/Redis required)
     |-- test_actions.py           # Action classification from keypoints
@@ -399,7 +429,9 @@ vision-labs/
     |-- test_feedback_db.py       # Feedback + suppression rule tests
     |-- test_tracker.py           # IoU matching + person tracking
     |-- test_routes.py            # Dashboard API endpoint tests
-    +-- test_vehicles.py          # Vehicle pipeline tests
+    |-- test_vehicles.py          # Vehicle pipeline tests
+    |-- test_notifications.py     # Notification logic tests
+    +-- test_scene_analysis.py    # Scene analysis + description tests
 ```
 
 ---

@@ -31,29 +31,29 @@ class TestPromptSelection:
     """Tests for choosing the correct prompt based on event type."""
 
     def test_person_prompt_content(self):
-        """Person prompt asks for clothing, gender, hair, accessories."""
+        """Person prompt asks for clothing, build, hair, accessories."""
         from routes.notifications import _PERSON_PROMPT
         assert "clothing" in _PERSON_PROMPT.lower()
-        assert "gender" in _PERSON_PROMPT.lower()
+        assert "build" in _PERSON_PROMPT.lower()
         assert "hair" in _PERSON_PROMPT.lower()
 
     def test_vehicle_prompt_content(self):
-        """Vehicle prompt asks for type, color, license plate."""
+        """Vehicle prompt asks for type, color, plates."""
         from routes.notifications import _VEHICLE_PROMPT
         assert "vehicle type" in _VEHICLE_PROMPT.lower()
         assert "color" in _VEHICLE_PROMPT.lower()
-        assert "license plate" in _VEHICLE_PROMPT.lower()
+        assert "plates" in _VEHICLE_PROMPT.lower()
 
     def test_prompts_are_different(self):
         """Person and vehicle prompts are distinct."""
         from routes.notifications import _PERSON_PROMPT, _VEHICLE_PROMPT
         assert _PERSON_PROMPT != _VEHICLE_PROMPT
 
-    def test_prompts_mention_telegram(self):
-        """Both prompts note the output goes into a Telegram caption."""
+    def test_prompts_mention_local_log(self):
+        """Both prompts note the output goes into a local log."""
         from routes.notifications import _PERSON_PROMPT, _VEHICLE_PROMPT
-        assert "telegram" in _PERSON_PROMPT.lower()
-        assert "telegram" in _VEHICLE_PROMPT.lower()
+        assert "local" in _PERSON_PROMPT.lower()
+        assert "local" in _VEHICLE_PROMPT.lower()
 
 
 # ===========================================================================
