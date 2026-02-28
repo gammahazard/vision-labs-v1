@@ -24,7 +24,7 @@ Thumbs.db
 
 # Databases (contain face embeddings, auth credentials)
 *.db
-
+clips /
 # Test / Debug artifacts
 .pytest_cache/
 *.log
