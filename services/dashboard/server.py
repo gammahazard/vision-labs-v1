@@ -203,11 +203,11 @@ from routes.zones import router as zones_router
 from routes.notifications import router as notifications_router
 from routes.auth import router as auth_router, init_auth_db, validate_session
 from routes.browse import router as browse_router
-from routes.feedback import router as feedback_router, set_feedback_db
-from routes.ai import router as ai_router, set_ai_db, set_feedback_db as ai_set_feedback_db, set_gpu_ready_flag
+from routes.ai import router as ai_router, set_ai_db, set_gpu_ready_flag
 from routes.telegram_access import router as telegram_access_router
 from routes.image_gen import router as image_gen_router
-from routes.video_pipeline import router as video_pipeline_router
+from routes.metrics import router as metrics_router, start_metrics_collector
+from routes.recordings import router as recordings_router
 
 app.include_router(events_router)
 app.include_router(config_router)
@@ -218,11 +218,11 @@ app.include_router(zones_router)
 app.include_router(notifications_router)
 app.include_router(auth_router)
 app.include_router(browse_router)
-app.include_router(feedback_router)
 app.include_router(ai_router)
 app.include_router(telegram_access_router)
 app.include_router(image_gen_router)
-app.include_router(video_pipeline_router)
+app.include_router(metrics_router)
+app.include_router(recordings_router)
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +233,7 @@ _AUTH_EXEMPT = {
     "/login.html", "/api/auth/login", "/api/auth/status",
     "/api/login-bg",
     "/style.css", "/auth.js", "/favicon.ico",
+    "/metrics",
 }
 
 
@@ -315,27 +316,19 @@ async def startup():
     else:
         logger.info(f"Config already exists in {CONFIG_KEY}: {existing}")
 
-    # Initialize feedback database for self-learning loop
-    from feedback_db import FeedbackDB
-    global _feedback_db
-    _feedback_db = FeedbackDB("/data/feedback.db")
-    set_feedback_db(_feedback_db)
-    logger.info("Feedback database initialized")
-
     # Initialize AI assistant database
     from ai_db import AIDB
     global _ai_db
     _ai_db = AIDB("/data/ai.db")
     set_ai_db(_ai_db)
-    ai_set_feedback_db(_feedback_db)
     logger.info("AI assistant database initialized")
 
     # Start background event notification poller
     asyncio.create_task(_event_notification_poller())
 
-    # Start Telegram callback poller (receives inline button taps)
+    # Start Telegram callback poller (receives commands)
     from routes.bot_commands import poll_telegram_callbacks
-    asyncio.create_task(poll_telegram_callbacks(_feedback_db))
+    asyncio.create_task(poll_telegram_callbacks())
 
     # Start reminder poller (checks every 60s for due reminders)
     asyncio.create_task(_reminder_poller(_ai_db))
@@ -346,6 +339,9 @@ async def startup():
 
     # Clear stale ComfyUI queue and GPU pause flag from previous session
     asyncio.create_task(_clear_comfyui_queue_on_startup())
+
+    # Start Prometheus metrics collector (polls Redis every 10s)
+    asyncio.create_task(start_metrics_collector())
 
     logger.info(f"Dashboard ready at http://localhost:{DASHBOARD_PORT}")
 
@@ -425,7 +421,7 @@ async def _ensure_ollama_model():
                 messages=[{"role": "user", "content": "The system just restarted. Confirm you are loaded and ready in one short sentence."}],
                 options={"num_predict": 30, "num_ctx": 8192},
                 think=False,
-                keep_alive="4h",
+                keep_alive="5m",
             ))
             # ollama library returns objects, not dicts
             reply = getattr(resp.message, "content", "") or "Model loaded and ready."
@@ -505,9 +501,7 @@ async def _event_notification_poller():
         notify_vehicle_idle, is_configured, get_latest_frame, get_sd_frame,
     )
 
-    # Get feedback_db reference
-    global _feedback_db
-    fdb = _feedback_db if '_feedback_db' in globals() else None
+
 
     # Ensure snapshot directory exists
     SNAPSHOT_DIR = os.path.join(os.environ.get("SNAPSHOT_DIR", "/data/snapshots"))
@@ -561,8 +555,9 @@ async def _event_notification_poller():
             sd_frame = get_sd_frame()  # Always needed for bbox scaling reference
             if snapshot_key:
                 frame = r_bin.get(snapshot_key.encode() if isinstance(snapshot_key, str) else snapshot_key)
-                if frame:
-                    is_hd = True  # Tracker prefers HD too
+                # Tracker snapshots are sub-stream (SD) resolution since
+                # the bbox coords come from the sub-stream detector.
+                # Do NOT set is_hd — bbox draws directly without scaling.
 
             # --- Fall back to live frame ---
             if not frame:
@@ -711,7 +706,7 @@ async def _event_notification_poller():
                             # Send Telegram if person notifications enabled
                             if is_configured() and notify_person:
                                 await notify_person_detected(
-                                    data, event_id=msg_id, feedback_db=fdb,
+                                    data, event_id=msg_id,
                                     snapshot_bytes=snap_bytes,
                                 )
 
@@ -725,7 +720,7 @@ async def _event_notification_poller():
                             # Skip if suppress_known is on (known people don't alert)
                             if is_configured() and notify_person and not suppress_known:
                                 await notify_person_identified(
-                                    data, event_id=msg_id, feedback_db=fdb,
+                                    data, event_id=msg_id,
                                     snapshot_bytes=snap_bytes,
                                 )
 
@@ -758,7 +753,7 @@ async def _event_notification_poller():
                                 )
                             if is_configured() and notify_vehicle:
                                 await notify_vehicle_idle(
-                                    data, event_id=msg_id, feedback_db=fdb,
+                                    data, event_id=msg_id,
                                     snapshot_bytes=snap_bytes,
                                 )
 

@@ -1,8 +1,8 @@
 # Vision Labs — Architecture Reference
 
-> **Last updated:** Feb 25, 2026
-> **Status:** Phases 0–12 complete. 22-tool AI assistant. Image generation (SDXL + LoRA + parameter sweeps). Video production (AnimateDiff + TTS + characters). Vision analysis (MiniCPM-V). Telegram Access Manager. Extended bot commands (15 commands + photo analysis). DVR recording + QNAP NAS storage. GPU pause coordination for detector/generation VRAM safety.
-> **Hardware:** RTX 3090 PC, Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
+> **Last updated:** Feb 27, 2026
+> **Status:** Phases 0–12 complete. 22-tool AI assistant. Image generation (SDXL + LoRA + parameter sweeps). Video production (WAN 2.1 i2v + AnimateDiff fallback + TTS + characters). Vision analysis (MiniCPM-V). Telegram Access Manager. Extended bot commands (15 commands + photo analysis). DVR recording + QNAP NAS storage. GPU pause coordination for detector/generation VRAM safety.
+> **Hardware:** RTX 3090 PC (24 GB VRAM), Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
 
 This document is the definitive reference for how the system works. If you lose context, start here.
 
@@ -33,6 +33,27 @@ This document is the definitive reference for how the system works. If you lose 
 
 ---
 
+## Hardware Inventory
+
+| Device | Role | Connection |
+|--------|------|------------|
+| **PC (RTX 3090)** | All services — inference, Redis, dashboard, tracker | NIC 1 → modem (internet, 192.168.2.x), NIC 2 → switch (camera LAN, 192.168.1.x) |
+| **Reolink RLC-1240A** | 12MP PoE IP camera, RTSP stream source | PoE injector → switch |
+| **Cisco Unmanaged Switch** | Connects all LAN devices | Central hub |
+| **60W PoE++ Injector** | Powers the Reolink camera (~13W draw) | Between switch and camera |
+| **QNAP NAS (TS-431X2)** | Video archive, event storage (5.2 TB) | Ethernet → switch |
+
+### Static IP Plan
+
+| Device | IP (static) | Subnet |
+|--------|------------|--------|
+| PC NIC 1 (WAN) | `192.168.2.1` | Internet via modem |
+| PC NIC 2 (LAN) | `192.168.1.x` | Camera/NAS network |
+| Reolink 1240A | `192.168.2.10` | RTSP camera feed |
+| QNAP NAS | `192.168.1.250` | Storage / archive |
+
+---
+
 ## System Overview
 
 Vision Labs is an **AI-powered security camera system** built as event-driven microservices over Redis Streams. A single Reolink PoE camera provides an RTSP video feed that flows through a pipeline:
@@ -49,7 +70,7 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
 - **Loose coupling:** Services communicate only via Redis streams/hashes — no direct calls (except dashboard → face-recognizer HTTP proxy)
 - **Hot-reload:** Config changes from the dashboard propagate via Redis — no restarts needed
 - **Fault isolation:** Any service can crash without taking down the pipeline
-- **GPU budget:** YOLOv8s-pose (~500 MB) + YOLOv8s vehicles (~500 MB) + InsightFace buffalo_l (~600 MB) + Qwen 3 14B (~9.3 GB) + SDXL/AnimateDiff (~8.2 GB) + MiniCPM-V (~5.5 GB) — not all loaded simultaneously, Ollama swaps models, ComfyUI loads on demand, detectors auto-pause during generation via `GPU_PAUSE_KEY`
+- **GPU budget:** YOLOv8s-pose (~500 MB) + YOLOv8s vehicles (~500 MB) + InsightFace buffalo_l (~600 MB) + Qwen 3 14B (~9.3 GB) + WAN 2.1 FP8 (~18 GB peak) + SDXL (~6.5 GB) + MiniCPM-V (~5.5 GB) — not all loaded simultaneously. Ollama swaps models, ComfyUI loads on demand (WAN and SDXL never co-loaded), detectors auto-pause during generation via `GPU_PAUSE_KEY`. Peak during WAN video gen: ~18 GB (fits RTX 3090 24 GB)
 
 ---
 
@@ -120,7 +141,7 @@ Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
 | **face-recognizer** | vision-labsv1-face-recognizer-1 | 8081 | Yes | InsightFace embedding + REST API |
 | **dashboard** | vision-labsv1-dashboard-1 | 8080 | No | FastAPI + WebSocket + static frontend |
 | **ollama** | vision-labsv1-ollama-1 | 11434 | Yes | Local LLM inference (Qwen 3 14B + Dolphin Mistral Nemo 12B + MiniCPM-V 2.6) |
-| **comfyui** | vision-labsv1-comfyui-1 | 8188 | Yes | Stable Diffusion XL + AnimateDiff video generation |
+| **comfyui** | vision-labsv1-comfyui-1 | 8188 | Yes | Stable Diffusion XL + WAN 2.1 i2v (FP8) + AnimateDiff fallback + GGUF quantization |
 | **piper** | vision-labsv1-piper-1 | 10200 | No | Local text-to-speech (Wyoming protocol) |
 | **recorder** | vision-labsv1-recorder-1 | — | No | DVR recording to QNAP NAS (ffmpeg remux) |
 
@@ -457,14 +478,18 @@ All files in `services/dashboard/static/`. No build step — plain HTML/JS/CSS.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `index.html` | ~554 | Main dashboard: video feed, sidebar panels (events, faces, unknowns, zones, conditions, settings, notifications, auth). Enrollment wizard modal. Label modal. |
-| `ai.html` | ~618 | AI assistant page: tab layout for AI chat + Image Gen + Vision + Video tabs |
-| `telegram.html` | ~290 | Telegram Access Manager page (approved users + access log) |
-| `login.html` | ~877 | Login page with animated pulsing eye icon, dark theme, fade-in form |
-| `style.css` | ~2082 | Full dark theme, glassmorphism panels, responsive navbar (CSS-class-based, mobile 2-row wrap), zone editor styles, wizard overlay styles, event photo lightbox modal |
-| `ai.css` | ~984 | AI assistant page styles (chat bubbles, onboarding wizard, tool status, vision tab) |
+| `index.html` | ~578 | Main dashboard: video feed, sidebar panels (events, faces, unknowns, zones, conditions, settings, notifications, auth). Enrollment wizard modal. Label modal. |
+| `ai.html` | ~673 | AI assistant page: tab layout for AI chat + Image Gen + Vision + Video tabs |
+| `telegram.html` | ~339 | Telegram Access Manager page (approved users + access log) |
+| `login.html` | ~1005 | Login page with animated pulsing eye icon, dark theme, fade-in form |
+| `style.css` | ~2420 | Full dark theme, glassmorphism panels, responsive navbar (CSS-class-based, mobile 2-row wrap), zone editor styles, wizard overlay styles, event photo lightbox modal |
+| `ai.css` | ~1129 | AI assistant page styles (chat bubbles, onboarding wizard, tool status, vision tab) |
+| `generate.css` | ~2086 | Image gen + sweep + gallery styling |
+| `video.css` | ~870 | Video tab styling |
 | `app.js` | ~364 | Core: WebSocket connect (auto-reconnect 2s), FPS counter, settings sliders (debounced 300ms POST), notification status, `init()` orchestrator |
 | `ai.js` | ~837 | AI chat client: onboarding wizard, message rendering (markdown + inline images), tool-call status display, VRAM tab state management |
+| `generate.js` | ~1771 | Image gen + gallery + sweeps + creative chat |
+| `video.js` | ~761 | Video production tab + WAN LoRA selector |
 | `auth.js` | ~103 | Logout, change password/username, auth status display |
 | `events.js` | ~380 | Polls `/api/events` every 2s, deduplicates by event ID, renders event cards with icons + clickable photo thumbnails (face photos for known users, camera snapshots for unknowns), lightbox modal for full-size viewing |
 | `faces.js` | ~385 | Multi-angle enrollment wizard (5 angles: front/left/right/up/down), face gallery grouped by name, delete all angles for a person |
@@ -577,14 +602,14 @@ The dashboard writes config to `config:{camera_id}` Redis hash. Services poll th
 | `auth-data` | `/data` (dashboard) | Auth + feedback + AI SQLite databases |
 | `snapshot-data` | `/data/snapshots` (dashboard) | Event + vehicle snapshots (persists across container restarts) |
 | `ollama-models` | `/root/.ollama` (ollama) | Qwen 3 14B + MiniCPM-V 2.6 model weights |
-| `comfyui-data` | `/app/models` (comfyui) | SDXL checkpoints + AnimateDiff motion models |
+| `comfyui-data` | `/app/models` (comfyui) | SDXL checkpoints, WAN 2.1 models (FP8), AnimateDiff, LoRAs, VAE, CLIP |
 | `piper-data` | `/data` (piper) | Piper TTS voice models |
-| `qnap-snapshots` | `/data/snapshots` (dashboard) | Event snapshots on QNAP NAS (CIFS) |
-| `qnap-recordings` | `/recordings` (recorder) | DVR MPEG-TS segments on QNAP NAS (CIFS) |
-| `qnap-events` | `/data/events` (dashboard) | Daily JSONL event journal on QNAP NAS (CIFS) |
-| `qnap-telegram` | `/data/telegram` (dashboard) | Per-user Telegram audit trail on QNAP NAS (CIFS) |
-| `qnap-generations` | `/data/generations` (dashboard) | AI-generated images on QNAP NAS (CIFS) |
-| `qnap-videos` | `/data/videos` (dashboard) | AI-produced videos on QNAP NAS (CIFS) |
+| `qnap-snapshots` | `/data/snapshots` (dashboard) | Event snapshots (currently local volumes — QNAP CIFS disabled) |
+| `qnap-recordings` | `/recordings` (recorder) | DVR MPEG-TS segments (currently local volumes — QNAP CIFS disabled) |
+| `qnap-events` | `/data/events` (dashboard) | Daily JSONL event journal (currently local volumes — QNAP CIFS disabled) |
+| `qnap-telegram` | `/data/telegram` (dashboard) | Per-user Telegram audit trail (currently local volumes — QNAP CIFS disabled) |
+| `qnap-generations` | `/data/generations` (dashboard) | AI-generated images (currently local volumes — QNAP CIFS disabled) |
+| `qnap-videos` | `/data/videos` (dashboard) | AI-produced videos (currently local volumes — QNAP CIFS disabled) |
 
 ### Shared Contract Mounting
 
@@ -798,9 +823,9 @@ Multimodal vision model via Ollama for describing camera scenes and analyzing up
 
 ---
 
-## Phase 12: Video Production (AnimateDiff + TTS)
+## Phase 12: Video Production (WAN 2.1 + TTS)
 
-AI video generation pipeline: script → animated scenes → narration → final video.
+AI video generation pipeline: script → SDXL keyframe → WAN 2.1 animation → narration → final video.
 
 ### Pipeline Flow
 
@@ -808,32 +833,50 @@ AI video generation pipeline: script → animated scenes → narration → final
 1. Script Generation (Ollama)
    User prompt → JSON { title, characters[], scenes[{image_prompt, narration, duration}] }
 
-2. Scene Animation (ComfyUI + AnimateDiff)
-   Per scene: SDXL + AnimateDiff motion model → 16 frames at 8fps
+2. Keyframe Generation (ComfyUI + SDXL)
+   Per scene: SDXL checkpoint → single keyframe image (832×480)
    Optional: IPAdapter for character face conditioning
-   Optional: source image for img2vid (denoise=0.75)
+   Optional: SDXL LoRA for style
 
-3. TTS Narration (Piper)
+3. WAN 2.1 Image-to-Video (ComfyUI)
+   Per scene: keyframe → WAN 2.1 14B FP8 → 81 frames at 16fps (~5 seconds)
+   Uses: UNETLoader (GGUF) → WanImageToVideo → SamplerCustomAdvanced → VHS_VideoCombine
+   Optional: WAN LoRA for animation quality
+   Fallback: AnimateDiff if WAN models not available
+
+4. TTS Narration (Piper)
    Per scene: narration text → Wyoming protocol → WAV audio
 
-4. Assembly (ffmpeg)
+5. Assembly (ffmpeg)
    Per scene: loop clip + merge audio → pad/trim to duration
    Final: concat all scenes → libx264 CRF 23, AAC 128k
 ```
 
 ### Character System
 
-Characters stored at `/data/characters/{slug}/meta.json` with reference images. During generation, character names are matched in scene prompts and their reference images are injected via IPAdapter Plus Face (`ip-adapter-plus-face_sdxl_vit-h.safetensors`).
+Characters stored at `/data/characters/{slug}/meta.json` with reference images. During keyframe generation, character names are matched in scene prompts and their reference images are injected via IPAdapter Plus Face (`ip-adapter-plus-face_sdxl_vit-h.safetensors`). The keyframe then provides pixel-perfect character consistency to WAN.
+
+### WAN 2.1 Models (auto-downloaded on first boot)
+
+| Model | File | Size |
+|-------|------|------|
+| Diffusion (14B FP8) | `wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors` | ~14 GB |
+| Text Encoder (FP8) | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | ~9 GB |
+| VAE | `wan_2.1_vae.safetensors` | ~335 MB |
+| CLIP Vision | `clip_vision_h.safetensors` | ~1.2 GB |
 
 ### Current Specs
 
 | Spec | Value |
 |------|-------|
-| Frame count | 16 per scene |
-| FPS | 8 |
-| Resolution | User-selectable: 512×288, 768×432, or 1024×576 |
-| Motion model | `mm_sdxl_v10_beta.ckpt` |
-| Default model | `zillah.safetensors` |
+| Frame count (WAN) | 81 per scene (~5 seconds) |
+| Frame count (AnimateDiff fallback) | 16 per scene |
+| FPS | 16 (WAN), 8 (AnimateDiff) |
+| Resolution | WAN native: 832×480, HD experimental: 1280×720 |
+| WAN model | `wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors` (GGUF/FP8) |
+| AnimateDiff fallback | `mm_sdxl_v10_beta.ckpt` |
+| Default SDXL model | `zillah.safetensors` (user-provided) |
+| WAN LoRA directory | `models/comfyui/wan_loras/` |
 | TTS engine | Piper (Wyoming protocol) |
 | Output codec | H.264 (libx264) CRF 23 |
 
@@ -841,9 +884,9 @@ Characters stored at `/data/characters/{slug}/meta.json` with reference images. 
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `routes/video_pipeline.py` | ~1463 | Full pipeline: script gen, AnimateDiff workflow, TTS, ffmpeg assembly, GPU pause coordination |
-| `static/video.js` | ~731 | Video tab UI: script editor, production controls, history |
-| `static/video.css` | ~764 | Video tab styling |
+| `routes/video_pipeline.py` | ~2157 | Full pipeline: script gen, WAN i2v workflow, keyframe gen, AnimateDiff fallback, TTS, ffmpeg assembly, GPU pause |
+| `static/video.js` | ~761 | Video tab UI: script editor, production controls, WAN LoRA selector, history |
+| `static/video.css` | ~870 | Video tab styling |
 
 ---
 
@@ -898,12 +941,12 @@ vision-labsv1/
 ├── build.ps1                     # Windows build/deploy script
 ├── build.sh                      # Linux build/deploy script
 ├── docker-compose.yml            # All 11 services + 14 volumes
+├── docker-compose.override.yml   # Local volume overrides (QNAP bypass)
 ├── fix_encoding.py               # Encoding fix utility
-├── v1.md                         # Original brainstorm
-├── v2.md                         # Refined build plan
 │
 ├── models/                       # Model storage (gitignored)
-│   └── comfyui/                  # SDXL checkpoints, LoRAs, AnimateDiff, VAE, CLIP
+│   └── comfyui/                  # SDXL checkpoints, WAN 2.1 models, LoRAs, AnimateDiff, VAE, CLIP
+│       └── wan_loras/            # WAN-specific LoRAs (e.g. genhelpervideosafetensors.safetensors)
 │
 ├── contracts/                    # Shared API contract (single source of truth)
 │   ├── __init__.py               # Package docstring
@@ -944,52 +987,52 @@ vision-labsv1/
 │   │
 │   └── dashboard/
 │       ├── Dockerfile
-│       ├── server.py             # FastAPI + WebSocket (~1025 lines)
-│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~521 lines)
-│       ├── ai_db.py              # AI config + reminders + chat history (SQLite, ~209 lines)
+│       ├── server.py             # FastAPI + WebSocket (~1182 lines)
+│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~581 lines)
+│       ├── ai_db.py              # AI config + reminders + chat history (SQLite, ~236 lines)
 │       ├── requirements.txt
 │       ├── routes/
-│       │   ├── __init__.py       # Shared state container (r, r_bin, logger, keys, ~49 lines)
-│       │   ├── auth.py           # Login/logout/password (~258 lines)
-│       │   ├── events.py         # Event feed + snapshot API (~115 lines)
-│       │   ├── config.py         # Config + stats API (~64 lines)
-│       │   ├── conditions.py     # Time + weather API (~95 lines)
-│       │   ├── faces.py          # Face enrollment proxy (~91 lines)
-│       │   ├── unknowns.py       # Unknown faces proxy (~137 lines)
-│       │   ├── zones.py          # Zone CRUD API (~85 lines)
-│       │   ├── notifications.py  # Telegram integration (~826 lines)
-│       │   ├── feedback.py       # Feedback + suppression rules API (~97 lines)
-│       │   ├── browse.py         # Vehicle snapshot browser + faces gallery (~131 lines)
-│       │   ├── ai.py             # AI assistant chat endpoint + VRAM sync (~449 lines)
-│       │   ├── ai_tools.py       # 22 AI tool schemas + executors (~1263 lines)
-│       │   ├── ai_prompts.py     # Dynamic system prompt builder (~102 lines)
-│       │   ├── ai_state.py       # Per-request media side-channel (~71 lines)
-│       │   ├── image_gen.py      # Image generation API — ComfyUI proxy + VRAM + GPU pause (~925 lines)
-│       │   ├── video_pipeline.py # Video production pipeline + GPU pause (~1256 lines)
-│       │   ├── bot_commands.py   # Telegram bot polling + 15 commands + photo analysis (~1268 lines)
-│       │   └── telegram_access.py # Telegram user CRUD + access log (~87 lines)
+│       │   ├── __init__.py       # Shared state container (r, r_bin, logger, keys, ~57 lines)
+│       │   ├── auth.py           # Login/logout/password (~311 lines)
+│       │   ├── events.py         # Event feed + snapshot API (~137 lines)
+│       │   ├── config.py         # Config + stats API (~77 lines)
+│       │   ├── conditions.py     # Time + weather API (~110 lines)
+│       │   ├── faces.py          # Face enrollment proxy (~108 lines)
+│       │   ├── unknowns.py       # Unknown faces proxy (~160 lines)
+│       │   ├── zones.py          # Zone CRUD API (~110 lines)
+│       │   ├── notifications.py  # Telegram integration (~975 lines)
+│       │   ├── feedback.py       # Feedback + suppression rules API (~123 lines)
+│       │   ├── browse.py         # Vehicle snapshot browser + faces gallery (~158 lines)
+│       │   ├── ai.py             # AI assistant chat endpoint + VRAM sync (~540 lines)
+│       │   ├── ai_tools.py       # 22 AI tool schemas + executors (~1416 lines)
+│       │   ├── ai_prompts.py     # Dynamic system prompt builder (~118 lines)
+│       │   ├── ai_state.py       # Per-request media side-channel (~94 lines)
+│       │   ├── image_gen.py      # Image generation API — ComfyUI proxy + VRAM + GPU pause (~1131 lines)
+│       │   ├── video_pipeline.py # Video production pipeline — WAN 2.1 i2v + AnimateDiff fallback (~2157 lines)
+│       │   ├── bot_commands.py   # Telegram bot polling + 15 commands + photo analysis (~1468 lines)
+│       │   └── telegram_access.py # Telegram user CRUD + access log (~105 lines)
 │       └── static/
-│           ├── index.html        # Main dashboard layout (~554 lines)
-│           ├── ai.html           # AI assistant + image gen + vision + video (~618 lines)
-│           ├── telegram.html     # Telegram Access Manager (~290 lines)
-│           ├── login.html        # Login page (~877 lines)
-│           ├── style.css         # Dashboard CSS (~2082 lines)
-│           ├── ai.css            # AI page styles (~984 lines)
-│           ├── generate.css      # Image gen + sweep styling (~1806 lines)
-│           ├── video.css         # Video tab styling (~764 lines)
-│           ├── app.js            # Core + WebSocket + init (~314 lines)
-│           ├── ai.js             # AI chat + wizard + VRAM state logic (~738 lines)
-│           ├── generate.js       # Image gen + gallery + sweeps + creative chat (~1564 lines)
-│           ├── video.js          # Video production tab (~635 lines)
-│           ├── auth.js           # Auth UI (~92 lines)
-│           ├── events.js         # Event feed (~343 lines)
-│           ├── faces.js          # Face enrollment wizard (~330 lines)
-│           ├── unknowns.js       # Unknown faces gallery (~167 lines)
-│           ├── conditions.js     # Conditions panel (~152 lines)
-│           ├── zones.js          # Zone editor + canvas (~455 lines)
-│           ├── browse.js         # Vehicle snapshot browser (~179 lines)
-│           ├── feedback.js       # Feedback review queue (~331 lines)
-│           ├── telegram_access.js # Telegram Access Manager UI (~192 lines)
+│           ├── index.html        # Main dashboard layout (~578 lines)
+│           ├── ai.html           # AI assistant + image gen + vision + video (~673 lines)
+│           ├── telegram.html     # Telegram Access Manager (~339 lines)
+│           ├── login.html        # Login page (~1005 lines)
+│           ├── style.css         # Dashboard CSS (~2420 lines)
+│           ├── ai.css            # AI page styles (~1129 lines)
+│           ├── generate.css      # Image gen + sweep styling (~2086 lines)
+│           ├── video.css         # Video tab styling (~870 lines)
+│           ├── app.js            # Core + WebSocket + init (~364 lines)
+│           ├── ai.js             # AI chat + wizard + VRAM state logic (~837 lines)
+│           ├── generate.js       # Image gen + gallery + sweeps + creative chat (~1771 lines)
+│           ├── video.js          # Video production tab + WAN LoRA selector (~761 lines)
+│           ├── auth.js           # Auth UI (~103 lines)
+│           ├── events.js         # Event feed (~380 lines)
+│           ├── faces.js          # Face enrollment wizard (~385 lines)
+│           ├── unknowns.js       # Unknown faces gallery (~192 lines)
+│           ├── conditions.js     # Conditions panel (~174 lines)
+│           ├── zones.js          # Zone editor + canvas (~527 lines)
+│           ├── browse.js         # Vehicle snapshot browser (~206 lines)
+│           ├── feedback.js       # Feedback review queue (~374 lines)
+│           ├── telegram_access.js # Telegram Access Manager UI (~223 lines)
 │           └── favicon.svg       # Browser favicon
 │
 └── tests/                            # 248 tests — run: python -m pytest tests/ -v

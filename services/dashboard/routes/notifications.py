@@ -231,21 +231,25 @@ async def broadcast_photo(photo_bytes: bytes, caption: str = "",
                                reply_markup=reply_markup, chat_id=cid)
         if not first_msg_id and mid:
             first_msg_id = mid
+
+    # Increment Prometheus notification counter
+    if first_msg_id:
+        try:
+            from routes.metrics import vl_notifications_total
+            # Determine notification type from caption keywords
+            if "Vehicle" in caption:
+                vl_notifications_total.labels(type="vehicle").inc()
+            elif "Identified" in caption:
+                vl_notifications_total.labels(type="identified").inc()
+            else:
+                vl_notifications_total.labels(type="person").inc()
+        except Exception:
+            pass  # Metrics not loaded yet during startup
+
     return first_msg_id
 
 
-def _make_feedback_buttons(event_id: str) -> dict:
-    """
-    Build a Telegram inline keyboard with 3 verdict buttons.
-    callback_data format: "verdict:{verdict}:{event_id}"
-    """
-    return {
-        "inline_keyboard": [[
-            {"text": "✅ Real Detection", "callback_data": f"v:real:{event_id}"},
-            {"text": "❌ False Alarm", "callback_data": f"v:false:{event_id}"},
-            {"text": "👤 It's...", "callback_data": f"v:identify:{event_id}"},
-        ]]
-    }
+
 
 
 async def edit_message_buttons(message_id: int, text: str,
@@ -438,7 +442,7 @@ async def describe_scene(photo_bytes: bytes,
                     "images": [photo_bytes],
                 }],
                 options={"num_predict": 200},
-                keep_alive="24h",
+                keep_alive="5m",
             )
             text = response.message.content.strip()
             # Strip any <think>...</think> tags from reasoning models
@@ -622,7 +626,6 @@ def build_clip(duration: float = 5.0, fps: int = 10) -> bytes | None:
 # ---------------------------------------------------------------------------
 async def notify_person_detected(event_data: dict,
                                   event_id: str = "",
-                                  feedback_db=None,
                                   snapshot_bytes: bytes = None) -> int:
     """
     Send a Telegram notification when a person is detected.
@@ -653,11 +656,6 @@ async def notify_person_detected(event_data: dict,
     time_period = event_data.get("time_period", "")
     confidence = float(event_data.get("confidence", "0") or "0")
 
-    if feedback_db and feedback_db.should_suppress(
-        identity=identity, zone=zone, time_period=time_period, action=action
-    ):
-        logger.info(f"Notification suppressed for event {event_id}")
-        return 0
 
     _last_person_notification = now
 
@@ -672,7 +670,7 @@ async def notify_person_detected(event_data: dict,
     parts.append(f"\u2022 Time: {_now_str()}")
 
     caption = "\n".join(parts)
-    buttons = _make_feedback_buttons(event_id) if event_id else None
+
 
     # Use provided snapshot bytes, fall back to live frame
     frame = snapshot_bytes if snapshot_bytes else get_latest_frame()
@@ -693,25 +691,18 @@ async def notify_person_detected(event_data: dict,
                     pass
 
         # Draw bbox highlight on the snapshot if available
-        bbox_json = event_data.get("bbox", "")
+        # Use snapshot_bbox (matches saved frame) over bbox (latest tracker position)
+        # to avoid bbox/frame timing mismatch when person has moved
+        bbox_json = event_data.get("snapshot_bbox", "") or event_data.get("bbox", "")
         if bbox_json:
             frame = draw_bbox_on_frame(frame, bbox_json,
                                        label=name, color=(0, 255, 0))
-        msg_id = await broadcast_photo(frame, caption, reply_markup=buttons)
+        msg_id = await broadcast_photo(frame, caption)
     else:
         await broadcast_text(caption)
         msg_id = 0
 
-    # Store pending feedback record
-    if feedback_db and msg_id and event_id:
-        feedback_db.store_pending_event(
-            event_id=event_id,
-            event_type="person_appeared",
-            telegram_message_id=msg_id,
-            zone=zone, time_period=time_period,
-            action=action, confidence=confidence,
-            identity=identity,
-        )
+
 
     return msg_id
 
@@ -721,7 +712,6 @@ async def notify_person_detected(event_data: dict,
 # ---------------------------------------------------------------------------
 async def notify_person_identified(event_data: dict,
                                     event_id: str = "",
-                                    feedback_db=None,
                                     snapshot_bytes: bytes = None) -> int:
     """
     Send a Telegram notification when a person is identified by face recognition.
@@ -744,12 +734,7 @@ async def notify_person_identified(event_data: dict,
     if not identity_name:
         return 0  # Skip if no name was identified
 
-    # Check suppression for identified persons
-    if feedback_db and feedback_db.should_suppress(
-        identity=identity_name, zone=zone, time_period=time_period
-    ):
-        logger.info(f"Notification suppressed for identified '{identity_name}'")
-        return 0
+
 
     parts = [f"\U0001f464 <b>Person Identified</b>"]
     parts.append(f"\u2022 Name: {identity_name}")
@@ -761,32 +746,23 @@ async def notify_person_identified(event_data: dict,
     parts.append(f"\u2022 Time: {_now_str()}")
 
     caption = "\n".join(parts)
-    buttons = _make_feedback_buttons(event_id) if event_id else None
+
 
     # Use provided snapshot bytes, fall back to live frame
     frame = snapshot_bytes if snapshot_bytes else get_latest_frame()
     if frame:
         # Draw bbox highlight on the snapshot if available
-        bbox_json = event_data.get("bbox", "")
+        # Use snapshot_bbox (matches saved frame) over bbox (latest tracker position)
+        # to avoid bbox/frame timing mismatch when person has moved
+        bbox_json = event_data.get("snapshot_bbox", "") or event_data.get("bbox", "")
         if bbox_json:
             frame = draw_bbox_on_frame(frame, bbox_json,
                                        label=identity_name,
                                        color=(255, 255, 0))
-        msg_id = await broadcast_photo(frame, caption, reply_markup=buttons)
+        msg_id = await broadcast_photo(frame, caption)
     else:
         await broadcast_text(caption)
         msg_id = 0
-
-    # Store pending feedback
-    if feedback_db and msg_id and event_id:
-        feedback_db.store_pending_event(
-            event_id=event_id,
-            event_type="person_identified",
-            telegram_message_id=msg_id,
-            zone=zone, time_period=time_period,
-            action=action, confidence=confidence,
-            identity=identity_name,
-        )
 
     return msg_id
 
@@ -799,7 +775,6 @@ _last_vehicle_idle_notification = 0.0
 
 async def notify_vehicle_idle(event_data: dict,
                                event_id: str = "",
-                               feedback_db=None,
                                snapshot_bytes: bytes = None) -> int:
     """
     Send a Telegram notification when a vehicle has been idling.
@@ -829,13 +804,7 @@ async def notify_vehicle_idle(event_data: dict,
     duration_raw = float(event_data.get("duration", "0") or "0")
     confidence = event_data.get("vehicle_confidence", "")
 
-    # Check suppression BEFORE updating the rate-limit timer.
-    # If suppressed, we don't want to burn the cooldown window.
-    if feedback_db and feedback_db.should_suppress(
-        zone=zone, time_period=time_period
-    ):
-        logger.info(f"Vehicle idle notification suppressed for event {event_id}")
-        return 0
+
 
     _last_vehicle_idle_notification = now
 
@@ -857,7 +826,7 @@ async def notify_vehicle_idle(event_data: dict,
     parts.append(f"\u2022 Time: {_now_str()}")
 
     caption = "\n".join(parts)
-    buttons = _make_feedback_buttons(event_id) if event_id else None
+
 
     # Use provided snapshot bytes, fall back to live frame
     frame = snapshot_bytes if snapshot_bytes else get_latest_frame()
@@ -882,20 +851,12 @@ async def notify_vehicle_idle(event_data: dict,
         if bbox_json:
             frame = draw_bbox_on_frame(frame, bbox_json,
                                        label=vehicle_class, color=(0, 165, 255))
-        msg_id = await broadcast_photo(frame, caption, reply_markup=buttons)
+        msg_id = await broadcast_photo(frame, caption)
     else:
         await broadcast_text(caption)
         msg_id = 0
 
-    # Store pending feedback
-    if feedback_db and msg_id and event_id:
-        feedback_db.store_pending_event(
-            event_id=event_id,
-            event_type="vehicle_idle",
-            telegram_message_id=msg_id,
-            zone=zone, time_period=time_period,
-            confidence=float(confidence) if confidence else 0.0,
-        )
+
 
     # Note: No follow-up clip for vehicle idle — the snapshot with bbox is the
     # useful artifact. A live clip captured now would show the current scene,

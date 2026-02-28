@@ -355,9 +355,6 @@ function init() {
 
     // Load browse panel (browse.js)
     initBrowse();
-
-    // Load feedback panel (feedback.js)
-    initFeedbackPanel();
 }
 
 // Start when DOM is ready

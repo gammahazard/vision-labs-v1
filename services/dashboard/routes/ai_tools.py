@@ -7,13 +7,13 @@ PURPOSE:
     external APIs, or performs actions and returns a JSON string result
     that the LLM uses to formulate its response.
 
-TOOLS (22):
-    query_events, query_faces, query_feedback_stats, send_telegram,
-    schedule_reminder, get_system_status, retrain_rules, review_feedback,
+TOOLS (18):
+    query_events, query_faces, send_telegram,
+    schedule_reminder, get_system_status,
     get_live_scene, query_unknowns, query_events_by_date, query_zones,
     browse_vehicles, get_weather, query_event_patterns, capture_snapshot,
     capture_clip, query_notification_history, query_activity_heatmap,
-    record_verdict, show_faces, analyze_image
+    show_faces, analyze_image
 """
 
 import os
@@ -66,18 +66,7 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_feedback_stats",
-            "description": "Get feedback statistics: total verdicts, false alarm rate, accuracy, active suppression rules.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
+
     {
         "type": "function",
         "function": {
@@ -141,35 +130,7 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "retrain_rules",
-            "description": "Retrain the alert suppression model. Deletes all existing suppression rules and re-scans every feedback record to regenerate rules based on current patterns. Use when the user asks to retrain, refresh, or update the learning model.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "review_feedback",
-            "description": "Get recent user feedback records showing how the user has rated past alerts (real_detection, false_alarm, identified). Useful for understanding patterns and reviewing the learning history.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "count": {
-                        "type": "integer",
-                        "description": "Number of recent feedback records to return (max 100)",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
+
     {
         "type": "function",
         "function": {
@@ -340,32 +301,7 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "record_verdict",
-            "description": "Record a verdict (false_alarm or real_detection) for a recent event. Use when the user says something like 'mark that as false alarm' or 'that was real'. Gets the most recent event by default, or a specific one if event_id is provided.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "verdict": {
-                        "type": "string",
-                        "enum": ["false_alarm", "real_detection"],
-                        "description": "The verdict to record",
-                    },
-                    "event_id": {
-                        "type": "string",
-                        "description": "Optional: specific event ID. If omitted, uses the most recent event.",
-                    },
-                    "identity_label": {
-                        "type": "string",
-                        "description": "Optional: name/identity for this person (e.g. 'mail carrier', 'neighbor Bob')",
-                    },
-                },
-                "required": ["verdict"],
-            },
-        },
-    },
+
     {
         "type": "function",
         "function": {
@@ -413,18 +349,12 @@ async def execute_tool(name: str, args: dict) -> str:
             return _tool_query_events(args)
         elif name == "query_faces":
             return await _tool_query_faces()
-        elif name == "query_feedback_stats":
-            return _tool_query_feedback_stats()
         elif name == "send_telegram":
             return await _tool_send_telegram(args)
         elif name == "schedule_reminder":
             return _tool_schedule_reminder(args)
         elif name == "get_system_status":
             return _tool_get_system_status()
-        elif name == "retrain_rules":
-            return _tool_retrain_rules()
-        elif name == "review_feedback":
-            return _tool_review_feedback(args)
         elif name == "get_live_scene":
             return _tool_get_live_scene()
         elif name == "query_unknowns":
@@ -447,8 +377,6 @@ async def execute_tool(name: str, args: dict) -> str:
             return _tool_query_notification_history(args)
         elif name == "query_activity_heatmap":
             return _tool_query_activity_heatmap(args)
-        elif name == "record_verdict":
-            return _tool_record_verdict(args)
         elif name == "show_faces":
             return await _tool_show_faces(args)
         elif name == "analyze_image":
@@ -1048,12 +976,7 @@ async def _tool_query_faces() -> str:
         return json.dumps({"error": str(e)})
 
 
-def _tool_query_feedback_stats() -> str:
-    """Query feedback statistics."""
-    if not ai_state._feedback_db:
-        return json.dumps({"error": "Feedback DB not initialized"})
-    stats = ai_state._feedback_db.get_stats()
-    return json.dumps(stats)
+
 
 
 async def _tool_send_telegram(args: dict) -> str:
@@ -1179,32 +1102,6 @@ def _tool_get_system_status() -> str:
         return json.dumps({"error": str(e)})
 
 
-def _tool_retrain_rules() -> str:
-    """Retrain suppression rules from all feedback data."""
-    if not ai_state._feedback_db:
-        return json.dumps({"error": "Feedback database not available"})
-    try:
-        result = ai_state._feedback_db.retrain_rules()
-        return json.dumps(result)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
-def _tool_review_feedback(args: dict) -> str:
-    """Get recent feedback records."""
-    if not ai_state._feedback_db:
-        return json.dumps({"error": "Feedback database not available"})
-    try:
-        count = min(args.get("count", 20), 100)
-        records = ai_state._feedback_db.get_recent_feedback(limit=count)
-        return json.dumps({
-            "count": len(records),
-            "records": records,
-        })
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
 def _tool_query_activity_heatmap(args: dict) -> str:
     """Day-of-week × hour-of-day activity heatmap."""
     from collections import defaultdict
@@ -1283,55 +1180,6 @@ def _tool_query_activity_heatmap(args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _tool_record_verdict(args: dict) -> str:
-    """Record a verdict for a recent event. Same as Telegram inline buttons."""
-    if not ai_state._feedback_db:
-        return json.dumps({"error": "Feedback database not available"})
-
-    verdict = args.get("verdict", "")
-    if verdict not in ("false_alarm", "real_detection"):
-        return json.dumps({"error": f"Invalid verdict: {verdict}. Must be 'false_alarm' or 'real_detection'"})
-
-    event_id = args.get("event_id", "")
-    identity_label = args.get("identity_label", "")
-
-    try:
-        # If no event_id, get the most recent event
-        if not event_id:
-            entries = ctx.r.xrevrange(ctx.EVENT_STREAM, count=1)
-            if not entries:
-                return json.dumps({"error": "No events found in the stream"})
-            event_id = entries[0][0]
-
-        # Record the verdict
-        ok = ai_state._feedback_db.resolve_pending(
-            event_id=event_id,
-            verdict=verdict,
-            identity_label=identity_label,
-        )
-
-        # Get event details for confirmation
-        event_data = {}
-        try:
-            result = ctx.r.xrange(ctx.EVENT_STREAM, min=event_id, max=event_id)
-            if result:
-                event_data = result[0][1]
-        except Exception:
-            pass
-
-        event_type = event_data.get("event_type", "unknown")
-        identity = event_data.get("identity_name", "")
-
-        return json.dumps({
-            "success": ok,
-            "event_id": event_id,
-            "verdict": verdict,
-            "event_type": event_type,
-            "identity": identity or identity_label or "unknown",
-            "message": f"Verdict '{verdict}' recorded for event {event_id}",
-        })
-    except Exception as e:
-        return json.dumps({"error": str(e)})
 
 
 async def _tool_show_faces(args: dict) -> str:

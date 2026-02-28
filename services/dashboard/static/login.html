@@ -793,7 +793,7 @@
                 () => `redis: streams ok { memory: ${randInt(120, 340)}MB }`,
                 () => `tracker: vehicle_idle { class: "sedan", dur: ${randInt(60, 300)}s }`,
                 () => `dashboard: ws_clients: 0 | uptime: ${randInt(1, 72)}h`,
-                () => `feedback: accuracy 87% (${randInt(40, 120)} events)`,
+                () => `system: health check ok (${randInt(40, 120)} events today)`,
                 () => `qnap: dvr write ok { path: /recordings/${pad(new Date().getHours())}-${pad(new Date().getMinutes())}.mp4 }`,
                 () => `time_rules: period=overnight | suppression=off`,
                 () => `system: heartbeat ok`,

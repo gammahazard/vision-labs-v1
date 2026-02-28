@@ -649,11 +649,27 @@
 
             // Pagination
             if (data.total > GALLERY_LIMIT) {
+                const totalPages = Math.ceil(data.total / GALLERY_LIMIT);
+                const currentPage = Math.floor(offset / GALLERY_LIMIT) + 1;
+
                 let pHtml = '';
                 if (offset > 0) {
                     pHtml += `<button onclick="window._genGalleryPage(${Math.max(0, offset - GALLERY_LIMIT)})">← Newer</button>`;
                 }
-                pHtml += `<span>${offset + 1}–${Math.min(offset + GALLERY_LIMIT, data.total)} of ${data.total}</span>`;
+
+                // Page jump dropdown
+                pHtml += `<select onchange="window._genGalleryPage((this.value - 1) * ${GALLERY_LIMIT})" style="
+                    background: var(--surface-2, #2a2a3e); color: var(--text-primary, #e0e0e0);
+                    border: 1px solid var(--border, #3a3a4e); border-radius: 6px;
+                    padding: 4px 8px; font-size: 0.85rem; cursor: pointer;
+                ">`;
+                for (let p = 1; p <= totalPages; p++) {
+                    pHtml += `<option value="${p}" ${p === currentPage ? 'selected' : ''}>Page ${p} of ${totalPages}</option>`;
+                }
+                pHtml += `</select>`;
+
+                pHtml += `<span style="font-size:0.8rem;opacity:0.7">${offset + 1}–${Math.min(offset + GALLERY_LIMIT, data.total)} of ${data.total}</span>`;
+
                 if (offset + GALLERY_LIMIT < data.total) {
                     pHtml += `<button onclick="window._genGalleryPage(${offset + GALLERY_LIMIT})">Older →</button>`;
                 }
@@ -787,21 +803,25 @@
             combos = newCombos;
         }
 
-        // Fix seed across all combos for fair comparison
+        // Fix seed across all combos for fair comparison (unless random seed is checked)
         var fixedSeed = base.seed;
         if (fixedSeed < 0) fixedSeed = Math.floor(Math.random() * 4294967295);
+        var useRandomSeed = ($('sweepRandomSeed') || {}).checked || false;
 
         // Per-combo batch count
         var sweepBatch = parseInt(($('sweepBatchCount') || {}).value) || 1;
         sweepBatch = Math.max(1, Math.min(sweepBatch, 4));  // backend clamps to 4 max
 
-        return combos.map(function (overrides) {
+        return combos.map(function (overrides, idx) {
             var params = JSON.parse(JSON.stringify(base));
             params.batch_size = sweepBatch;
-            params.seed = fixedSeed;
+            // Apply sweep overrides FIRST (steps, cfg, lora_strength)
             Object.keys(overrides).forEach(function (k) {
                 params[k] = overrides[k];
             });
+            // Then set seed AFTER overrides (so sweep can't accidentally overwrite it)
+            params.seed = useRandomSeed ? Math.floor(Math.random() * 4294967295) : fixedSeed;
+            console.log('[Sweep] Combo ' + (idx + 1) + ' seed=' + params.seed + ' useRandom=' + useRandomSeed);
             // LoRA strength 0 = disable LoRA
             if (params.lora_strength === 0) {
                 params.lora = '';
@@ -1537,224 +1557,6 @@
             resetButton();
         }
     }
-
-    // --- Creative Chat (Dolphin – Floating Modal, shared by Generate and Video tabs) ---
-    var _creativeHistory = { gen: [], vid: [] };
-    var _creativeCurrentCtx = 'gen';
-    var _CREATIVE_HISTORY_KEY = 'creative_chat_history';
-    var _CREATIVE_MAX_MSGS = 15;  // keep last N messages per context
-
-    // Restore from localStorage on load
-    try {
-        var saved = JSON.parse(localStorage.getItem(_CREATIVE_HISTORY_KEY));
-        if (saved && saved.gen) _creativeHistory.gen = saved.gen.slice(-_CREATIVE_MAX_MSGS);
-        if (saved && saved.vid) _creativeHistory.vid = saved.vid.slice(-_CREATIVE_MAX_MSGS);
-    } catch (e) { /* ignore parse errors */ }
-
-    function _saveCreativeHistory() {
-        try {
-            // Trim to last N messages before saving
-            var toSave = {
-                gen: _creativeHistory.gen.slice(-_CREATIVE_MAX_MSGS),
-                vid: _creativeHistory.vid.slice(-_CREATIVE_MAX_MSGS),
-            };
-            localStorage.setItem(_CREATIVE_HISTORY_KEY, JSON.stringify(toSave));
-        } catch (e) { /* quota exceeded etc */ }
-    }
-
-    function _getCreativeContext() {
-        var vidTab = document.getElementById('tabVideo');
-        if (vidTab && vidTab.style.display !== 'none') return 'vid';
-        return 'gen';
-    }
-
-    window._creativeOpenModal = function () {
-        _creativeCurrentCtx = _getCreativeContext();
-        var overlay = document.getElementById('creativeModalOverlay');
-        var ctxBadge = document.getElementById('creativeModalContext');
-        var welcomeEl = document.getElementById('creativeWelcome');
-        var inputEl = document.getElementById('creativeInput');
-        var msgs = document.getElementById('creativeMessages');
-
-        if (ctxBadge) ctxBadge.textContent = _creativeCurrentCtx === 'vid' ? 'video' : 'generate';
-        if (welcomeEl) {
-            welcomeEl.textContent = _creativeCurrentCtx === 'vid'
-                ? 'Ask me to help plan video scenes, scripts, or storyboards!'
-                : 'Ask me to help craft image prompts, styles, or ideas!';
-        }
-        if (inputEl) {
-            inputEl.placeholder = _creativeCurrentCtx === 'vid'
-                ? 'e.g. Write a scene where a robot explores a forest...'
-                : 'e.g. Write me a cinematic portrait prompt...';
-        }
-
-        // Restore saved messages into the DOM if the chat area is empty
-        var history = _creativeHistory[_creativeCurrentCtx];
-        if (msgs && history.length > 0 && msgs.querySelectorAll('.creative-chat-msg').length === 0) {
-            if (welcomeEl) welcomeEl.style.display = 'none';
-            history.forEach(function (msg) {
-                var div = document.createElement('div');
-                if (msg.role === 'user') {
-                    div.className = 'creative-chat-msg creative-chat-user';
-                    div.textContent = msg.content;
-                } else {
-                    div.className = 'creative-chat-msg creative-chat-ai';
-                    div.innerHTML = _formatCreativeReply(msg.content, _creativeCurrentCtx);
-                }
-                msgs.appendChild(div);
-            });
-            msgs.scrollTop = msgs.scrollHeight;
-        }
-
-        if (overlay) overlay.style.display = 'flex';
-        if (inputEl) setTimeout(function () { inputEl.focus(); }, 100);
-    };
-
-    window._creativeCloseModal = function (event) {
-        if (event && event.target !== event.currentTarget) return;
-        var overlay = document.getElementById('creativeModalOverlay');
-        if (overlay) overlay.style.display = 'none';
-    };
-
-    // Close modal on Escape
-    document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') {
-            var overlay = document.getElementById('creativeModalOverlay');
-            if (overlay && overlay.style.display !== 'none') {
-                overlay.style.display = 'none';
-                e.stopPropagation();
-            }
-        }
-    });
-
-    window._creativeSendModal = async function () {
-        var prefix = _creativeCurrentCtx;
-        var input = document.getElementById('creativeInput');
-        var msgs = document.getElementById('creativeMessages');
-        if (!input || !msgs) return;
-
-        var text = input.value.trim();
-        if (!text) return;
-        input.value = '';
-        input.disabled = true;
-
-        // Remove welcome message if still showing
-        var welcome = document.getElementById('creativeWelcome');
-        if (welcome) welcome.remove();
-
-        // Add user message
-        var userDiv = document.createElement('div');
-        userDiv.className = 'creative-chat-msg creative-chat-user';
-        userDiv.textContent = text;
-        msgs.appendChild(userDiv);
-
-        // Add thinking indicator
-        var thinkDiv = document.createElement('div');
-        thinkDiv.className = 'creative-chat-msg creative-chat-ai creative-chat-thinking';
-        thinkDiv.innerHTML = '<span class="creative-thinking-dots">Thinking</span>';
-        msgs.appendChild(thinkDiv);
-        msgs.scrollTop = msgs.scrollHeight;
-
-        var context = prefix === 'vid' ? 'video' : 'generate';
-        _creativeHistory[prefix].push({ role: 'user', content: text });
-        _saveCreativeHistory();
-
-        // Gather current settings for context-aware assistance
-        var settings = {};
-        if (prefix === 'gen') {
-            var modelSel = $('genModel');
-            var loraSel = $('genLora');
-            settings = {
-                model: modelSel ? modelSel.value : '',
-                steps: $('genSteps') ? parseInt($('genSteps').value) : 20,
-                cfg: $('genCfg') ? parseFloat($('genCfg').value) : 7.0,
-                seed: $('genSeed') ? parseInt($('genSeed').value) : -1,
-                lora: loraSel ? loraSel.value : '',
-                lora_strength: $('genLoraStrength') ? parseFloat($('genLoraStrength').value) : 0.8,
-                batch_count: $('genBatchCount') ? parseInt($('genBatchCount').value) : 1,
-                width: selectedWidth,
-                height: selectedHeight,
-                positive_prompt: $('genPrompt') ? $('genPrompt').value : '',
-                negative_prompt: $('genNegative') ? $('genNegative').value : '',
-            };
-        } else {
-            var concept = document.getElementById('videoConcept');
-            var scriptPre = document.getElementById('videoScriptPreview');
-            settings = {
-                concept: concept ? concept.value : '',
-                script_preview: scriptPre ? scriptPre.textContent.substring(0, 2000) : '',
-            };
-        }
-
-        try {
-            var resp = await fetch('/api/ai/creative', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    message: text,
-                    history: _creativeHistory[prefix].slice(-20),
-                    context: context,
-                    settings: settings,
-                }),
-            });
-            var data = await resp.json();
-
-            msgs.removeChild(thinkDiv);
-
-            if (data.error) {
-                var errDiv = document.createElement('div');
-                errDiv.className = 'creative-chat-msg creative-chat-error';
-                errDiv.textContent = '\u26a0\ufe0f ' + data.error;
-                msgs.appendChild(errDiv);
-            } else {
-                var reply = data.reply || '';
-                _creativeHistory[prefix].push({ role: 'assistant', content: reply });
-                _saveCreativeHistory();
-
-                var aiDiv = document.createElement('div');
-                aiDiv.className = 'creative-chat-msg creative-chat-ai';
-                aiDiv.innerHTML = _formatCreativeReply(reply, prefix);
-                msgs.appendChild(aiDiv);
-            }
-        } catch (e) {
-            msgs.removeChild(thinkDiv);
-            var errDiv2 = document.createElement('div');
-            errDiv2.className = 'creative-chat-msg creative-chat-error';
-            errDiv2.textContent = '\u26a0\ufe0f Failed to connect: ' + e.message;
-            msgs.appendChild(errDiv2);
-        }
-
-        input.disabled = false;
-        input.focus();
-        msgs.scrollTop = msgs.scrollHeight;
-    };
-
-    function _formatCreativeReply(text, prefix) {
-        var html = text.replace(/```[\w]*\n?([\s\S]*?)```/g, function (match, code) {
-            var escaped = code.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-            var btnTarget = prefix === 'vid' ? 'videoConcept' : 'genPrompt';
-            return '<div class="creative-code-block"><pre>' + escaped + '</pre>' +
-                '<button class="creative-use-btn" onclick="window._creativeUse(this, \'' + btnTarget + '\')">Use This</button></div>';
-        });
-        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
-        html = html.replace(/\n/g, '<br>');
-        return html;
-    }
-
-    window._creativeUse = function (btn, targetId) {
-        var pre = btn.parentElement.querySelector('pre');
-        if (!pre) return;
-        var target = document.getElementById(targetId);
-        if (!target) return;
-        target.value = pre.textContent;
-        target.focus();
-        btn.textContent = 'Pasted!';
-        setTimeout(function () { btn.textContent = 'Use This'; }, 2000);
-        // Close the modal after using
-        var overlay = document.getElementById('creativeModalOverlay');
-        if (overlay) overlay.style.display = 'none';
-    };
 
 
     // Expose for tab switch

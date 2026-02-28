@@ -11,7 +11,6 @@ PURPOSE:
 # Shared state — set by server.py via setter functions
 # ---------------------------------------------------------------------------
 _ai_db = None
-_feedback_db = None
 _model_gpu_ready = False  # Set True by server.py after warm-up chat succeeds
 
 
@@ -21,10 +20,6 @@ def set_ai_db(db):
     _ai_db = db
 
 
-def set_feedback_db(db):
-    """Called by server.py to inject the feedback database instance."""
-    global _feedback_db
-    _feedback_db = db
 
 
 def set_gpu_ready_flag(ready: bool):

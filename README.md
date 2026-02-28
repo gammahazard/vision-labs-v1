@@ -21,7 +21,7 @@ An event-driven, microservices-based security camera system that detects people,
 | **Self-learning** | User feedback trains suppression rules — fewer false alarms over time |
 | **AI assistant** | Local Qwen 3 14B via Ollama — 22 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules, activity heatmaps, record verdicts conversationally, show enrolled face photos, AI vision analysis |
 | **Image generation** | Stable Diffusion via ComfyUI — txt2img/img2img, LoRA support, batch generation, parameter sweeps with per-combo batch count, gallery with lightbox navigation, prompt history, creative chat (Dolphin model) |
-| **Video production** | AnimateDiff pipeline — AI script generation (Ollama), per-scene animation with character face conditioning (IPAdapter), TTS narration (Piper), ffmpeg assembly, video history with delete |
+| **Video production** | WAN 2.1 i2v pipeline (primary) with AnimateDiff fallback — AI script generation (Ollama), SDXL keyframe → WAN animation (81 frames), character face conditioning (IPAdapter), WAN LoRA support, TTS narration (Piper), ffmpeg assembly, video history with delete |
 | **Vision analysis** | MiniCPM-V multimodal model via Ollama — describe camera snapshots, analyze uploaded images/videos |
 
 ---
@@ -38,7 +38,7 @@ Ingester --> Redis Streams --> YOLO Pose Detector --> Tracker --> Events
                            --> Dashboard (WebSocket --> Browser)
                            --> Telegram Notifications
                            --> Ollama (Qwen 3 14B) --> AI Chat / Vision / Script
-    |                      --> ComfyUI (Stable Diffusion) --> Image Gen / AnimateDiff
+    |                      --> ComfyUI (Stable Diffusion) --> Image Gen / WAN 2.1 i2v
     |                      --> Piper (TTS) --> Video Narration
     v
 Recorder --> ffmpeg (copy) --> QNAP NAS (MPEG-TS segments, 28-day rolling)
@@ -56,7 +56,7 @@ Eleven containerized services communicate through Redis Streams -- no direct int
 | **face-recognizer** | InsightFace embedding + enrollment API | Yes |
 | **dashboard** | FastAPI + WebSocket + static frontend | No |
 | **ollama** | Local LLM inference (Qwen 3 14B + Dolphin Mistral Nemo 12B + MiniCPM-V 2.6) | Yes |
-| **comfyui** | Stable Diffusion inference (SDXL + AnimateDiff) | Yes |
+| **comfyui** | Stable Diffusion inference (SDXL + WAN 2.1 i2v + AnimateDiff fallback + GGUF) | Yes |
 | **piper** | Local text-to-speech (Wyoming protocol) | No |
 | **recorder** | Continuous DVR recording to QNAP NAS (ffmpeg) | No |
 
@@ -285,7 +285,7 @@ Suppression is checked **before** the rate-limit timer — suppressed events don
 | Phase 9 | QNAP NAS storage -- DVR recording, event journal, Telegram audit trail | Done |
 | Phase 10 | AI image generation -- ComfyUI + SDXL, txt2img/img2img, LoRA, batch generation, gallery | Done |
 | Phase 11 | AI vision analysis -- MiniCPM-V 2.6 multimodal model, image/video description in chat | Done |
-| Phase 12 | AI video production -- AnimateDiff pipeline, script generation, TTS narration (Piper), ffmpeg assembly | Done |
+| Phase 12 | AI video production -- WAN 2.1 i2v pipeline (SDXL keyframe → WAN animation, 81 frames, FP8 quantized), AnimateDiff fallback, WAN LoRA support, script generation, TTS narration (Piper), ffmpeg assembly | Done |
 
 ### Phase 7: AI Assistant
 
@@ -360,8 +360,8 @@ The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-st
 | Frontend | Vanilla HTML/JS/CSS + WebSocket | Lightweight, no build step |
 | Pose detection | YOLOv8s-pose (Ultralytics) | Keypoints + bounding box in one model |
 | Face recognition | InsightFace buffalo_l | 512-dim embeddings, cosine matching |
-| Image generation | Stable Diffusion XL via ComfyUI | txt2img/img2img, LoRA, AnimateDiff |
-| Video animation | AnimateDiff (SDXL motion model) | Image-to-video scene animation |
+| Image generation | Stable Diffusion XL via ComfyUI | txt2img/img2img, LoRA support |
+| Video animation | WAN 2.1 14B (FP8) via ComfyUI | Image-to-video (81 frames), AnimateDiff fallback |
 | Vision model | MiniCPM-V 2.6 via Ollama | Multimodal image/video understanding |
 | Text-to-speech | Piper (Wyoming protocol) | Local TTS for video narration |
 | Time rules | astral | Sunrise/sunset from coordinates, no internet |
@@ -380,11 +380,14 @@ The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-st
 | Dolphin Mistral Nemo 12B (Ollama) | ~7,500 MB |
 | MiniCPM-V 2.6 (Ollama) | ~5,500 MB |
 | Stable Diffusion XL (ComfyUI) | ~6,500 MB |
-| AnimateDiff motion model | ~1,700 MB |
+| WAN 2.1 14B FP8 (ComfyUI) | ~14,000 MB |
+| WAN umt5_xxl text encoder | ~9,000 MB |
+| WAN VAE + CLIP Vision | ~1,500 MB |
+| AnimateDiff motion model (fallback) | ~1,700 MB |
 | IPAdapter face model | ~1,500 MB |
-| **Max theoretical** | **~34.1 GB** |
+| **Max theoretical** | **~58.6 GB** |
 
-> **Note:** Not all models run simultaneously. Ollama swaps models on demand (only one of Qwen 3 / MiniCPM-V / Dolphin loaded at a time). ComfyUI loads SDXL only during generation; IPAdapter and AnimateDiff load only during video production. GPU services (pose/vehicle detectors) automatically pause inference during image/video generation via a Redis `GPU_PAUSE_KEY` flag, preventing CUDA memory conflicts. Realistic peak during video generation: ~11 GB (SDXL + AnimateDiff + IPAdapter).
+> **Note:** Not all models run simultaneously. Ollama swaps models on demand (only one of Qwen 3 / MiniCPM-V / Dolphin loaded at a time). ComfyUI loads models on demand — during video production, WAN 2.1 FP8 uses ~18 GB peak (diffusion + text encoder + VAE + CLIP Vision). SDXL loads only for keyframe generation, then unloads before WAN loads. GPU services (pose/vehicle detectors) automatically pause inference during generation via a Redis `GPU_PAUSE_KEY` flag, preventing CUDA memory conflicts. Realistic peak during WAN video generation: ~18 GB (fits RTX 3090 24 GB).
 
 ---
 
@@ -395,7 +398,6 @@ vision-labs/
 |-- .env.example                  # Environment template (copy to .env)
 |-- docker-compose.yml            # All 11 services orchestrated
 |-- ARCHITECTURE.md               # Full technical deep dive
-|-- v2.md                         # Phased build plan with design rationale
 |
 |-- contracts/                    # Shared API contracts (mounted read-only into services)
 |   |-- __init__.py               # Package docstring
@@ -410,17 +412,17 @@ vision-labs/
 |   |-- face-recognizer/          # InsightFace + enrollment REST API (GPU)
 |   |-- vehicle-detector/         # YOLOv8s vehicle detection (GPU)
 |   |-- recorder/                 # DVR recording to QNAP NAS (ffmpeg)
-|   |-- comfyui/                  # Stable Diffusion XL + AnimateDiff (GPU)
+|   |-- comfyui/                  # Stable Diffusion XL + WAN 2.1 i2v + AnimateDiff (GPU)
 |   +-- dashboard/                # FastAPI backend + static frontend
-|       |-- server.py             # App factory, WebSocket handler, middleware (~1025 lines)
-|       |-- feedback_db.py        # Feedback + suppression rules (SQLite, ~521 lines)
-|       |-- ai_db.py              # AI config + reminders + chat history (SQLite, ~209 lines)
+|       |-- server.py             # App factory, WebSocket handler, middleware (~1182 lines)
+|       |-- feedback_db.py        # Feedback + suppression rules (SQLite, ~581 lines)
+|       |-- ai_db.py              # AI config + reminders + chat history (SQLite, ~236 lines)
 |       |-- routes/               # Modular API endpoints (events, faces, zones, auth, feedback, ai, telegram, image_gen, video_pipeline)
 |       +-- static/               # HTML/JS/CSS (no build step, no framework)
-|           |-- index.html         # Dashboard (live feed, sidebar panels, ~554 lines)
-|           |-- ai.html            # AI assistant + image gen + vision + video (~618 lines)
-|           |-- telegram.html      # Telegram Access Manager (users + access log, ~290 lines)
-|           +-- login.html         # Authentication page (~877 lines)
+|           |-- index.html         # Dashboard (live feed, sidebar panels, ~578 lines)
+|           |-- ai.html            # AI assistant + image gen + vision + video (~673 lines)
+|           |-- telegram.html      # Telegram Access Manager (users + access log, ~339 lines)
+|           +-- login.html         # Authentication page (~1005 lines)
 |
 +-- tests/                        # Unit + integration tests (no GPU/Redis required)
     |-- test_actions.py           # Action classification from keypoints

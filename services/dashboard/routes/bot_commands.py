@@ -142,13 +142,11 @@ def _seed_users_from_env():
 # ---------------------------------------------------------------------------
 # Polling loop — runs as a background task
 # ---------------------------------------------------------------------------
-async def poll_telegram_callbacks(feedback_db):
+async def poll_telegram_callbacks():
     """
-    Background task: poll Telegram for updates (callback queries + commands).
+    Background task: poll Telegram for updates (commands).
 
-    Handles two types of incoming updates:
-    1. callback_query — verdict buttons (✅/❌/👤) on notification messages
-    2. message — bot commands (/snapshot, /clip, /status, /arm, /disarm, /who)
+    Handles incoming bot commands (/snapshot, /clip, /status, /arm, /disarm, /who).
 
     Security: ALL incoming updates are validated via _is_authorized() before
     processing. Unauthorized users are silently ignored.
@@ -182,7 +180,7 @@ async def poll_telegram_callbacks(feedback_db):
                     {"command": "who", "description": "Who's in frame now"},
                     {"command": "events", "description": "Recent detections (1-20)"},
                     {"command": "zones", "description": "Snapshot with zone overlays"},
-                    {"command": "rules", "description": "Suppression rules + stats"},
+                    {"command": "rules", "description": "Time rules overview"},
                     {"command": "night", "description": "Night override status"},
                     {"command": "faces", "description": "Enrolled faces list"},
                     {"command": "timelapse", "description": "Day timelapse [YYYY-MM-DD]"},
@@ -256,13 +254,8 @@ async def poll_telegram_callbacks(feedback_db):
                         except Exception:
                             pass
                         continue
-                    await _handle_callback(
-                        cb.get("data", ""),
-                        cb.get("id", ""),
-                        cb.get("message", {}).get("message_id", 0),
-                        feedback_db,
-                        chat_id=str(cb_chat_id),
-                    )
+                    # Answer the callback query with a simple acknowledgement
+                    await answer_callback_query(cb.get("id", ""), "OK")
                     continue
 
                 # --- Messages (bot commands) ---
@@ -374,7 +367,7 @@ async def _handle_command(cmd: str, chat_id: str = "", text: str = "",
         "/status": _cmd_status,
         "/who": _cmd_who,
         "/zones": _cmd_zones,
-        "/rules": _cmd_rules,
+        "/rules": _cmd_time_rules,
         "/night": _cmd_night,
         "/faces": _cmd_faces,
         "/start": _cmd_help,
@@ -591,7 +584,7 @@ async def _cmd_help(chat_id: str = ""):
         "/who — 👁️ Who's in frame now\n"
         "/events [1-20] — 📋 Recent detections\n"
         "/zones — 🗺️ Camera view with zones drawn\n"
-        "/rules — 📜 Active suppression rules\n"
+        "/rules — 📜 Time rules overview\n"
         "/night — 🌙 Night mode status\n"
         "/faces — 👤 Enrolled faces\n"
         "/timelapse [YYYY-MM-DD] — ⏩ Timelapse from snapshots\n"
@@ -673,7 +666,7 @@ async def _describe_scene_multi(frames: list[bytes],
                     "images": frames,
                 }],
                 options={"num_predict": 300},
-                keep_alive="24h",
+                keep_alive="5m",
             )
             text = response.message.content.strip()
             text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
@@ -979,44 +972,19 @@ async def _cmd_zones(chat_id: str = ""):
 # ---------------------------------------------------------------------------
 # /rules — Active suppression rules
 # ---------------------------------------------------------------------------
-async def _cmd_rules(chat_id: str = ""):
-    """List active suppression rules and feedback stats."""
+async def _cmd_time_rules(chat_id: str = "", **kwargs):
+    """List active time-based notification rules."""
     try:
-        _fdb = ai_state._feedback_db
-        if not _fdb:
-            await send_text("⚠️ Feedback system not initialized", chat_id=chat_id)
-            return
-
-        rules = _fdb.get_suppression_rules()
-        stats = _fdb.get_stats()
-
-        parts = ["📜 <b>Suppression Rules</b>\n"]
-
-        # Stats summary
-        parts.append(
-            f"• Total feedback: {stats['total_feedback']}\n"
-            f"• Alert accuracy: {stats['alert_accuracy']:.0%}\n"
-            f"• Active rules: {stats['active_suppression_rules']}\n"
-        )
-
-        if not rules:
-            parts.append("No suppression rules created yet.")
-        else:
-            for r in rules:
-                status = "🟢 Active" if r.get("active", 1) else "⏸️ Paused"
-                rtype = r.get("rule_type", "unknown")
-                if rtype == "identity":
-                    target = r.get("identity", "?")
-                    parts.append(f"  👤 <b>{target}</b> — {status}")
-                elif rtype == "zone_time":
-                    zone = r.get("zone", "?")
-                    period = r.get("time_period", "?")
-                    parts.append(f"  📍 <b>{zone}</b> @ {period} — {status}")
-                else:
-                    parts.append(f"  ❓ {rtype} — {status}")
-                fa = r.get("min_false_alarms", "?")
-                parts.append(f"     ({fa} false alarms)")
-
+        cfg = ctx.r.hgetall(ctx.CONFIG_KEY)
+        parts = ["📜 <b>Notification Rules</b>\n"]
+        parts.append(f"• Person notifications: {'🟢 On' if cfg.get('notify_person', '1') == '1' else '🔴 Off'}")
+        parts.append(f"• Vehicle notifications: {'🟢 On' if cfg.get('notify_vehicle', '1') == '1' else '🔴 Off'}")
+        parts.append(f"• Suppress known faces: {'🟢 On' if cfg.get('suppress_known', '0') == '1' else '🔴 Off'}")
+        cooldown_p = cfg.get('notify_cooldown', '60')
+        cooldown_v = cfg.get('vehicle_cooldown', '60')
+        parts.append(f"• Person cooldown: {cooldown_p}s")
+        parts.append(f"• Vehicle cooldown: {cooldown_v}s")
+        parts.append(f"\n• Time: {_now_str()}")
         await send_text("\n".join(parts), chat_id=chat_id)
     except Exception as e:
         await send_text(f"⚠️ Failed to fetch rules: {e}", chat_id=chat_id)
@@ -1215,49 +1183,6 @@ def _build_timelapse(jpg_paths: list[str], fps: int = 3) -> bytes | None:
 # ---------------------------------------------------------------------------
 # Callback handler — verdict buttons on notification messages
 # ---------------------------------------------------------------------------
-async def _handle_callback(callback_data: str, callback_id: str,
-                            message_id: int, feedback_db,
-                            chat_id: str = ""):
-    """
-    Process a Telegram callback_query from an inline keyboard button.
-
-    callback_data format: "v:{verdict}:{event_id}"
-      - v:real:{event_id}     → Real detection
-      - v:false:{event_id}    → False alarm
-      - v:identify:{event_id} → User wants to name this person
-    """
-    if callback_data == "noop":
-        await answer_callback_query(callback_id, "Already recorded")
-        return
-
-    parts = callback_data.split(":", 2)
-    if len(parts) != 3 or parts[0] != "v":
-        await answer_callback_query(callback_id, "Unknown action")
-        return
-
-    _, verdict_code, event_id = parts
-
-    verdict_map = {
-        "real": "real_detection",
-        "false": "false_alarm",
-        "identify": "identified",
-    }
-    verdict = verdict_map.get(verdict_code)
-    if not verdict:
-        await answer_callback_query(callback_id, "Unknown verdict")
-        return
-
-    if verdict == "identified":
-        feedback_db.resolve_pending(event_id, "identified", identity_label="")
-        await answer_callback_query(callback_id, "Marked for identification — name from dashboard")
-        await edit_message_buttons(message_id, "👤 Awaiting name (dashboard)", chat_id=chat_id)
-        logger.info(f"Event {event_id}: marked for identification via Telegram")
-    else:
-        feedback_db.resolve_pending(event_id, verdict)
-        label = "✅ Real Detection" if verdict == "real_detection" else "❌ False Alarm"
-        await answer_callback_query(callback_id, f"Recorded: {label}")
-        await edit_message_buttons(message_id, f"{label} — Recorded", chat_id=chat_id)
-        logger.info(f"Event {event_id}: verdict={verdict} via Telegram")
 
 
 # ---------------------------------------------------------------------------
@@ -1358,7 +1283,7 @@ async def _cmd_ask(chat_id: str = "", text: str = ""):
                 tools=TOOLS,
                 options={"num_ctx": 8192},
                 think=False,
-                keep_alive="4h",
+                keep_alive="5m",
             ),
         )
 
@@ -1384,7 +1309,7 @@ async def _cmd_ask(chat_id: str = "", text: str = ""):
                     tools=TOOLS,
                     options={"num_ctx": 8192},
                     think=False,
-                    keep_alive="4h",
+                    keep_alive="5m",
                 ),
             )
 

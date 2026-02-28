@@ -3,7 +3,7 @@ routes/ai_prompts.py — System prompt builder for the AI assistant.
 
 PURPOSE:
     Builds the system prompt injected into every LLM conversation.
-    Includes live system context (enrolled faces, zones, events, feedback)
+    Includes live system context (enrolled faces, zones, events)
     and the AI's personality/capability instructions.
 """
 
@@ -48,18 +48,6 @@ async def build_system_context() -> str:
         parts.append(f"Active zones: {count}")
     except Exception:
         pass
-    # Feedback stats
-    if ai_state._feedback_db:
-        try:
-            stats = ai_state._feedback_db.get_stats()
-            parts.append(
-                f"Feedback stats: {stats.get('total_feedback', 0)} total, "
-                f"{stats.get('false_alarms', 0)} false alarms, "
-                f"{stats.get('real_detections', 0)} real detections, "
-                f"{stats.get('active_rules', 0)} active suppression rules"
-            )
-        except Exception:
-            pass
     # Event stream size
     try:
         ev_len = ctx.r.xlen(ctx.EVENT_STREAM)
@@ -94,9 +82,6 @@ CAPABILITIES (use tools when relevant):
 - Capture a live camera snapshot and describe it to the user
 - Get current weather conditions (temperature, humidity, wind)
 - Browse vehicle detection snapshots by day
-- Check feedback stats and suppression rules
-- Retrain the alert suppression model from all feedback data
-- Review recent feedback history (user verdicts on past alerts)
 - Send Telegram messages immediately (with optional live camera snapshot or 5-second video clip)
 - Schedule timed reminders via Telegram (with optional snapshot or video clip captured at scheduled time)
 - Check system status, configuration, and zone definitions

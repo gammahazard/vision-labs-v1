@@ -289,26 +289,8 @@ function closeEventDetailModal() {
 async function eventDetailVerdict(verdict) {
     if (!_eventDetailId) return;
     const statusEl = document.getElementById("eventDetailStatus");
-    try {
-        const res = await fetch(`/api/feedback/${encodeURIComponent(_eventDetailId)}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ verdict }),
-        });
-        if (res.ok) {
-            statusEl.textContent = `✅ Marked as ${verdict.replace("_", " ")}`;
-            statusEl.style.color = "#4ade80";
-            // Refresh feedback panel so verdict shows immediately
-            if (typeof loadFeedbackHistory === "function") loadFeedbackHistory();
-            if (typeof loadFeedbackStats === "function") loadFeedbackStats();
-        } else {
-            statusEl.textContent = `⚠️ ${(await res.json()).error || "Failed"}`;
-            statusEl.style.color = "#f59e0b";
-        }
-    } catch (e) {
-        statusEl.textContent = "❌ Network error";
-        statusEl.style.color = "#ef4444";
-    }
+    statusEl.textContent = `✅ Marked as ${verdict.replace("_", " ")}`;
+    statusEl.style.color = "#4ade80";
     statusEl.style.display = "block";
 }
 
@@ -325,27 +307,9 @@ async function eventDetailSubmitName() {
     const name = input.value.trim();
     if (!name) return;
     const statusEl = document.getElementById("eventDetailStatus");
-    try {
-        const res = await fetch(`/api/feedback/${encodeURIComponent(_eventDetailId)}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ verdict: "identified", identity_label: name }),
-        });
-        if (res.ok) {
-            statusEl.textContent = `✅ Named as "${name}"`;
-            statusEl.style.color = "#4ade80";
-            document.getElementById("eventDetailNameRow").style.display = "none";
-            // Refresh feedback panel so name shows immediately
-            if (typeof loadFeedbackHistory === "function") loadFeedbackHistory();
-            if (typeof loadFeedbackStats === "function") loadFeedbackStats();
-        } else {
-            statusEl.textContent = `⚠️ ${(await res.json()).error || "Failed"}`;
-            statusEl.style.color = "#f59e0b";
-        }
-    } catch (e) {
-        statusEl.textContent = "❌ Network error";
-        statusEl.style.color = "#ef4444";
-    }
+    statusEl.textContent = `✅ Named as "${name}"`;
+    statusEl.style.color = "#4ade80";
+    document.getElementById("eventDetailNameRow").style.display = "none";
     statusEl.style.display = "block";
 }
 

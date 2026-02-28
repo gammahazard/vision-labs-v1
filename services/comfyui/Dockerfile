@@ -1,55 +1,73 @@
-FROM python:3.11-slim
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
-# System dependencies for ComfyUI + video generation
+# Prevent interactive prompts during apt install
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.11, system deps for ComfyUI + video generation
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git wget ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    git wget ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
 
 WORKDIR /app
 
 # Install PyTorch with CUDA 12.1
-RUN pip install --no-cache-dir \
+RUN python -m pip install --no-cache-dir \
     torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu121
 
-# Clone ComfyUI
+# Clone ComfyUI — v0.15.0 includes EmptyWanLatentVideo for proper t2v generation
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git /app && \
-    pip install --no-cache-dir -r requirements.txt
+    cd /app && git checkout v0.15.0 && \
+    python -m pip install --no-cache-dir -r requirements.txt
 
-# Install AnimateDiff-Evolved custom node
+# Install AnimateDiff-Evolved custom node — pinned version
 RUN cd /app/custom_nodes && \
     git clone https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved.git && \
-    cd ComfyUI-AnimateDiff-Evolved && \
-    pip install --no-cache-dir -r requirements.txt || true
+    cd ComfyUI-AnimateDiff-Evolved && git checkout v1.20.0 && \
+    python -m pip install --no-cache-dir -r requirements.txt || true
 
-# Install VideoHelperSuite (for video output nodes — GIF/MP4 encoding)
+# Install VideoHelperSuite (for video output nodes — GIF/MP4 encoding) — pinned version
 RUN cd /app/custom_nodes && \
     git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
-    cd ComfyUI-VideoHelperSuite && \
-    pip install --no-cache-dir -r requirements.txt || true
+    cd ComfyUI-VideoHelperSuite && git checkout v1.5.0 && \
+    python -m pip install --no-cache-dir -r requirements.txt || true
 
-# Create model directories and download AnimateDiff SDXL motion model
-RUN mkdir -p /app/models/animatediff_models /app/models/animatediff_motion_lora && \
-    wget -q -O /app/models/animatediff_models/mm_sdxl_v10_beta.ckpt \
-    "https://huggingface.co/guoyww/animatediff/resolve/main/mm_sdxl_v10_beta.ckpt" || \
-    echo "Warning: AnimateDiff motion model download failed — will need manual download"
-
-# Install IPAdapter Plus custom node (for character consistency via face conditioning)
+# Install IPAdapter Plus custom node — pinned version
 RUN cd /app/custom_nodes && \
     git clone https://github.com/cubiq/ComfyUI_IPAdapter_plus.git && \
-    cd ComfyUI_IPAdapter_plus && \
-    pip install --no-cache-dir -r requirements.txt || true
+    cd ComfyUI_IPAdapter_plus && git checkout V3.0 && \
+    python -m pip install --no-cache-dir -r requirements.txt || true
 
-# Download IP-Adapter plus-face SDXL model + CLIP vision encoder
-RUN mkdir -p /app/models/ipadapter /app/models/clip_vision && \
-    wget -q -O /app/models/ipadapter/ip-adapter-plus-face_sdxl_vit-h.safetensors \
-    "https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus-face_sdxl_vit-h.safetensors" && \
-    wget -q -O /app/models/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors \
-    "https://huggingface.co/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors" || \
-    echo "Warning: IP-Adapter model download failed — character consistency will be unavailable"
+# Install GGUF support (enables FP8 quantized WAN models for lower VRAM usage)
+RUN cd /app/custom_nodes && \
+    git clone https://github.com/city96/ComfyUI-GGUF.git && \
+    cd ComfyUI-GGUF && \
+    python -m pip install --no-cache-dir -r requirements.txt || true
+
+# Ensure critical deps are installed LAST (after all custom nodes, so nothing overwrites them)
+# - pyyaml: ComfyUI's utils/extra_config.py requires 'import yaml'
+# - requests: ComfyUI's frontend_management.py requires 'import requests'
+# - opencv-python-headless: VideoHelperSuite requires 'import cv2'
+RUN python -m pip install --no-cache-dir pyyaml requests opencv-python-headless imageio-ffmpeg && \
+    python -c "import yaml; import requests; import cv2; import imageio_ffmpeg; print('deps OK')"
+
+# Model downloads moved to entrypoint.sh — they must live on the host
+# volume (./models/comfyui:/app/models) to persist across rebuilds.
+# The Dockerfile previously downloaded them here but the volume mount
+# would override /app/models with an empty directory at runtime.
+
+# Copy entrypoint script (handles first-run model downloads)
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Default port
 EXPOSE 8188
 
-# Run ComfyUI — listen on all interfaces, no browser launch
-CMD ["python", "main.py", "--listen", "0.0.0.0", "--port", "8188"]
+# Entrypoint downloads missing models, then starts ComfyUI
+ENTRYPOINT ["/entrypoint.sh"]

@@ -51,6 +51,7 @@ _cached_default_model_time = 0
 # Lazy Redis client for GPU pause flag
 _pause_redis = None
 GPU_PAUSE_TTL = 300  # 5 min safety — auto-clears if dashboard crashes mid-generation
+GPU_LOCK_KEY = "gpu:generation_lock"  # Centralized lock: prevents concurrent generations
 
 
 def _get_pause_redis():
@@ -81,6 +82,32 @@ def _clear_gpu_pause():
         logger.info("GPU pause flag CLEARED — detectors will resume")
     except Exception as e:
         logger.warning(f"Failed to clear GPU pause flag: {e}")
+
+
+def _acquire_gpu_lock(owner: str = "image_gen") -> bool:
+    """Acquire centralized GPU lock. Returns False if another generation is running."""
+    try:
+        acquired = _get_pause_redis().set(
+            GPU_LOCK_KEY, owner, nx=True, ex=GPU_PAUSE_TTL + 60
+        )
+        if acquired:
+            logger.info(f"GPU generation lock ACQUIRED by {owner}")
+        else:
+            current = _get_pause_redis().get(GPU_LOCK_KEY)
+            logger.warning(f"GPU generation lock DENIED — held by '{current}'")
+        return bool(acquired)
+    except Exception as e:
+        logger.warning(f"GPU lock acquire failed: {e}")
+        return True  # Fail open
+
+
+def _release_gpu_lock():
+    """Release the centralized GPU generation lock."""
+    try:
+        _get_pause_redis().delete(GPU_LOCK_KEY)
+        logger.info("GPU generation lock RELEASED")
+    except Exception as e:
+        logger.warning(f"GPU lock release failed: {e}")
 
 
 def _get_default_model() -> str:
@@ -240,7 +267,7 @@ def _build_img2img_workflow(
         "4": {
             "class_type": "CheckpointLoaderSimple",
             "inputs": {
-                "ckpt_name": model or "model.safetensors",
+                "ckpt_name": model or _get_default_model(),
             },
         },
         "6": {
@@ -309,7 +336,13 @@ def _build_img2img_workflow(
 @router.post("/api/generate")
 async def generate_image(request_body: dict):
     """Queue an image generation job with ComfyUI."""
+    lock_acquired = False
     try:
+        # Check GPU lock — reject if video pipeline is running
+        if not _acquire_gpu_lock("image_gen:txt2img"):
+            return {"error": "GPU is busy — video pipeline is running. Please wait and try again."}
+        lock_acquired = True
+
         # Free VRAM: unload Ollama models so ComfyUI gets full GPU memory
         # Without this, model loading takes 11+ minutes due to weight offloading
         await free_vram()
@@ -381,6 +414,7 @@ async def generate_image(request_body: dict):
             "timestamp": datetime.now().isoformat(),
         }
 
+        # GPU lock stays held — released when history poll finds completion
         return {
             "prompt_id": prompt_id,
             "client_id": client_id,
@@ -389,8 +423,14 @@ async def generate_image(request_body: dict):
         }
 
     except httpx.ConnectError:
+        _clear_gpu_pause()
+        if lock_acquired:
+            _release_gpu_lock()
         return {"error": "ComfyUI is not running. Start it with: docker compose up -d comfyui"}
     except Exception as e:
+        _clear_gpu_pause()
+        if lock_acquired:
+            _release_gpu_lock()
         logger.warning(f"Generate error: {e}")
         return {"error": str(e)}
 
@@ -413,7 +453,13 @@ async def generate_img2img(
     lora_strength: float = Form(0.8),
 ):
     """Upload an image and generate variations using img2img."""
+    lock_acquired = False
     try:
+        # Check GPU lock — reject if video pipeline is running
+        if not _acquire_gpu_lock("image_gen:img2img"):
+            return {"error": "GPU is busy — another generation is in progress. Please wait and try again."}
+        lock_acquired = True
+
         # Free VRAM: unload Ollama models so ComfyUI gets full GPU memory
         await free_vram()
 
@@ -490,6 +536,7 @@ async def generate_img2img(
             "timestamp": datetime.now().isoformat(),
         }
 
+        # GPU lock stays held — released when history poll finds completion
         return {
             "prompt_id": prompt_id,
             "client_id": client_id,
@@ -498,8 +545,14 @@ async def generate_img2img(
         }
 
     except httpx.ConnectError:
+        _clear_gpu_pause()
+        if lock_acquired:
+            _release_gpu_lock()
         return {"error": "ComfyUI is not running. Start it with: docker compose up -d comfyui"}
     except Exception as e:
+        _clear_gpu_pause()
+        if lock_acquired:
+            _release_gpu_lock()
         logger.warning(f"img2img error: {e}")
         return {"error": str(e)}
 
@@ -628,8 +681,9 @@ async def get_generation_result(prompt_id: str):
                         logger.warning(f"Failed to save to QNAP: {save_err}")
 
         if images:
-            # Generation complete — resume GPU detectors
+            # Generation complete — resume GPU detectors and release lock
             _clear_gpu_pause()
+            _release_gpu_lock()
             return {
                 "status": "complete",
                 "images": images,
@@ -765,8 +819,9 @@ async def cancel_generation():
         # Evict stale _gen_params entries (older than 1 hour) to prevent leaks
         _evict_stale_gen_params()
 
-        # Resume GPU detectors
+        # Resume GPU detectors and release lock
         _clear_gpu_pause()
+        _release_gpu_lock()
 
         return {"success": True, "status_code": resp.status_code}
     except Exception as e:

@@ -510,8 +510,8 @@ function switchModelTab(tabName) {
     document.getElementById('tabVision').style.display = tabName === 'vision' ? 'flex' : 'none';
     const genTab = document.getElementById('tabGenerate');
     if (genTab) genTab.style.display = tabName === 'generate' ? 'flex' : 'none';
-    const vidTab = document.getElementById('tabVideo');
-    if (vidTab) vidTab.style.display = tabName === 'video' ? 'flex' : 'none';
+    const recTab = document.getElementById('tabRecordings');
+    if (recTab) recTab.style.display = tabName === 'recordings' ? 'flex' : 'none';
 
     // Focus relevant input
     if (tabName === 'chat') {
@@ -522,10 +522,8 @@ function switchModelTab(tabName) {
         if (typeof window.initGenerateTab === 'function') {
             window.initGenerateTab();
         }
-    } else if (tabName === 'video') {
-        if (typeof window.initVideoTab === 'function') {
-            window.initVideoTab();
-        }
+    } else if (tabName === 'recordings') {
+        window._initRecordingsTab();
     }
 }
 
@@ -835,3 +833,129 @@ function copyVisionResult() {
         console.warn('Failed to copy to clipboard');
     });
 }
+
+// ---------------------------------------------------------------------------
+// DVR Recordings Tab
+// ---------------------------------------------------------------------------
+let _recLastDate = '';  // track last loaded date to avoid redundant fetches
+
+window._initRecordingsTab = async function () {
+    // Always re-fetch dates so new recordings appear
+    try {
+        const resp = await fetch('/api/recordings/dates');
+        const data = await resp.json();
+        const sel = document.getElementById('recDatePicker');
+        const prevValue = sel.value;  // remember current selection
+        sel.innerHTML = '';
+
+        if (!data.dates || data.dates.length === 0) {
+            sel.innerHTML = '<option value="">No recordings found</option>';
+            return;
+        }
+
+        data.dates.forEach((d) => {
+            const opt = document.createElement('option');
+            opt.value = d;
+            try {
+                const dt = new Date(d + 'T12:00:00');
+                opt.textContent = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            } catch (_) {
+                opt.textContent = d;
+            }
+            sel.appendChild(opt);
+        });
+
+        // Restore previous selection if still valid, otherwise load most recent
+        const dateToLoad = data.dates.includes(prevValue) ? prevValue : data.dates[0];
+        sel.value = dateToLoad;
+        if (dateToLoad !== _recLastDate) {
+            window._loadRecSegments(dateToLoad);
+        }
+    } catch (e) {
+        console.warn('Failed to load recording dates:', e);
+    }
+};
+
+window._loadRecSegments = async function (date) {
+    if (!date) return;
+    _recLastDate = date;
+
+    // Close any playing video when switching dates
+    window._closeRecPlayer();
+
+    const grid = document.getElementById('recSegmentGrid');
+    grid.innerHTML = '<div style="color:var(--text-secondary,#888); grid-column:1/-1; text-align:center; padding:20px;">Loading...</div>';
+
+    try {
+        const resp = await fetch(`/api/recordings/segments?date=${date}`);
+        const data = await resp.json();
+
+        if (!data.segments || data.segments.length === 0) {
+            grid.innerHTML = '<div style="color:var(--text-secondary,#888); grid-column:1/-1; text-align:center; padding:20px;">No recordings for this date</div>';
+            return;
+        }
+
+        grid.innerHTML = '';
+        data.segments.forEach(seg => {
+            const card = document.createElement('button');
+            card.style.cssText = 'background:var(--bg-elevated,#1e1e2e); border:1px solid var(--border,#333); border-radius:8px; padding:12px; cursor:pointer; text-align:center; transition:all 0.2s;';
+            card.innerHTML = `
+                <div style="font-size:1.1em; font-weight:600; color:var(--text-primary,#e0e0e0);">${seg.time}</div>
+                <div style="font-size:0.8em; color:var(--text-secondary,#888); margin-top:4px;">${seg.size_mb} MB</div>
+            `;
+            card.onmouseenter = () => card.style.borderColor = 'var(--accent,#6366f1)';
+            card.onmouseleave = () => card.style.borderColor = 'var(--border,#333)';
+            card.onclick = () => window._playRecording(date, seg.filename, seg.time);
+            grid.appendChild(card);
+        });
+    } catch (e) {
+        grid.innerHTML = '<div style="color:#ef4444; grid-column:1/-1; text-align:center; padding:20px;">Failed to load segments</div>';
+    }
+};
+
+window._playRecording = function (date, filename, timeLabel) {
+    const player = document.getElementById('recPlayer');
+    const wrap = document.getElementById('recPlayerWrap');
+    const label = document.getElementById('recPlayerLabel');
+
+    // Stop any current playback
+    player.pause();
+
+    // Show loading state while ffmpeg remuxes on first access
+    label.textContent = `⏳ Converting ${timeLabel}...`;
+    wrap.style.display = 'block';
+    player.style.opacity = '0.4';
+
+    // Set source
+    const url = `/api/recordings/stream/${date}/${filename}`;
+    player.src = url;
+
+    // When video is ready to play, update label and show player
+    player.oncanplay = function () {
+        label.textContent = `📹 ${timeLabel} — ${date}`;
+        player.style.opacity = '1';
+        player.oncanplay = null;  // fire once
+    };
+
+    // Error handler
+    player.onerror = function () {
+        const err = player.error;
+        const msg = err ? `Code ${err.code}: ${err.message || 'unknown'}` : 'unknown error';
+        console.error('DVR playback error:', msg, 'URL:', url);
+        label.textContent = `❌ Playback error — ${msg}`;
+        player.style.opacity = '1';
+    };
+
+    // Load the video
+    player.load();
+};
+
+window._closeRecPlayer = function () {
+    const player = document.getElementById('recPlayer');
+    player.pause();
+    player.removeAttribute('src');
+    player.style.opacity = '1';
+    player.oncanplay = null;
+    player.load();
+    document.getElementById('recPlayerWrap').style.display = 'none';
+};

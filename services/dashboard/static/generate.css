@@ -10,6 +10,9 @@
     padding: 16px;
     height: calc(100vh - 180px);
     overflow-y: auto;
+    overflow-x: hidden;
+    max-width: 100vw;
+    box-sizing: border-box;
 }
 
 /* --- Status bar --- */
@@ -555,7 +558,7 @@
     gap: 12px;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 768px) {
     .generate-results-grid {
         grid-template-columns: 1fr;
     }
@@ -1701,8 +1704,8 @@
     color: #71717a;
 }
 
-/* Responsive: smaller screens */
-@media (max-width: 600px) {
+/* Responsive: smaller screens (iPhone, mobile) */
+@media (max-width: 768px) {
     .sweep-param-row {
         flex-direction: column;
         align-items: flex-start;
@@ -1720,6 +1723,137 @@
     .sweep-results-grid {
         grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
         gap: 8px;
+    }
+
+    /* Sweep footer — stack vertically on mobile */
+    .sweep-footer {
+        flex-direction: column;
+        gap: 10px;
+        align-items: stretch;
+    }
+
+    .sweep-combo-count {
+        text-align: center;
+    }
+
+    .sweep-batch-group {
+        justify-content: center;
+    }
+
+    .sweep-run-btn {
+        width: 100% !important;
+    }
+
+    /* Sweep LoRA dropdown — full width on mobile */
+    .sweep-lora-select {
+        max-width: 100%;
+        width: 100%;
+    }
+
+    /* Sweep panel padding */
+    .sweep-panel {
+        padding: 12px;
+    }
+
+    /* Actions row — stack generate + gallery + sweep buttons */
+    .generate-actions-row {
+        flex-direction: column;
+    }
+
+    .generate-actions-row .generate-btn,
+    .generate-actions-row .gallery-btn,
+    .generate-actions-row .sweep-btn {
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    .gallery-btn {
+        text-align: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        white-space: normal;
+    }
+
+    /* Gallery modal — full-screen on mobile */
+    .gallery-modal-overlay {
+        padding: 0;
+    }
+
+    .gallery-modal {
+        max-width: 100%;
+        max-height: 100vh;
+        border-radius: 0;
+    }
+
+    .gallery-modal-body {
+        padding: 10px;
+    }
+
+    .gallery-grid {
+        grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+        gap: 6px;
+    }
+
+    /* Lightbox nav — smaller and tighter on mobile */
+    .lightbox-overlay {
+        padding: 10px;
+    }
+
+    .lightbox-nav {
+        width: 36px;
+        height: 56px;
+        font-size: 1.6em;
+    }
+
+    .lightbox-prev {
+        left: 6px;
+    }
+
+    .lightbox-next {
+        right: 6px;
+    }
+
+    .lightbox-close {
+        top: 10px;
+        right: 10px;
+        width: 36px;
+        height: 36px;
+    }
+
+    /* Status bar — wrap on mobile */
+    .generate-status-bar {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    /* Dimension presets — wrap on mobile */
+    .dimension-presets {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .dimension-preset {
+        flex-shrink: 0;
+        font-size: 0.7em;
+        padding: 4px 8px;
+    }
+
+    /* Image actions — wrap neatly */
+    .generate-image-actions {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    .generate-image-actions button {
+        flex: 1;
+        min-width: 80px;
+        text-align: center;
+    }
+
+    /* Clip gallery grid on mobile */
+    .clip-gallery-grid {
+        grid-template-columns: 1fr;
     }
 }
 

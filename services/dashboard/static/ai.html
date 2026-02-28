@@ -10,7 +10,7 @@
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="ai.css">
     <link rel="stylesheet" href="generate.css">
-    <link rel="stylesheet" href="video.css">
+
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 
@@ -25,6 +25,7 @@
                 <a href="/" class="nav-link">🏠 Home</a>
                 <a href="/ai.html" class="nav-link nav-link--active">🤖 AI</a>
                 <a href="/telegram.html" class="nav-link">🔐 Telegram</a>
+                <a href="/monitoring.html" class="nav-link">📊 Monitoring</a>
             </div>
         </div>
     </nav>
@@ -106,8 +107,9 @@
             <button class="model-tab" data-tab="generate" onclick="switchModelTab('generate')">
                 <span class="model-tab-icon">🎨</span> Generate
             </button>
-            <button class="model-tab" data-tab="video" onclick="switchModelTab('video')">
-                <span class="model-tab-icon">🎬</span> Video
+
+            <button class="model-tab" data-tab="recordings" onclick="switchModelTab('recordings')">
+                <span class="model-tab-icon">📹</span> DVR
             </button>
         </div>
 
@@ -426,6 +428,11 @@
                             <input type="number" id="sweepBatchCount" min="1" max="4" value="1"
                                 class="sweep-batch-input">
                         </div>
+                        <div class="sweep-batch-group">
+                            <label class="video-checkbox-label" style="padding-top:0;">
+                                <input type="checkbox" id="sweepRandomSeed"> Random seed per combo
+                            </label>
+                        </div>
                         <button class="generate-btn sweep-run-btn" id="sweepRunBtn" onclick="window._genRunSweep()"
                             disabled>▶
                             Run Sweep</button>
@@ -462,141 +469,42 @@
             </div>
         </div>
 
-        <!-- Tab: Video Pipeline -->
-        <div id="tabVideo" class="tab-panel" style="display: none;">
-            <div class="video-panel">
-                <div class="video-status-bar">
-                    <span class="video-status-label">🎬 Video Pipeline</span>
-                    <span class="video-status-dot" id="videoStatusDot"></span>
-                    <span class="video-status-text" id="videoStatusText">Ready</span>
-                </div>
 
-                <!-- Characters Panel -->
-                <div class="video-characters-panel" id="videoCharactersPanel">
-                    <div class="video-characters-header">
-                        <span>👤 Characters</span>
-                        <button class="video-char-add-btn" onclick="window._videoAddCharacter()">+ Add</button>
-                    </div>
-                    <div class="video-characters-grid" id="videoCharactersGrid">
-                        <!-- Populated by JS -->
+
+
+
+        <!-- Tab: DVR Recordings -->
+        <div id="tabRecordings" class="tab-panel" style="display: none;">
+            <div class="video-section">
+                <h3 style="margin:0 0 12px; color:var(--text-primary,#e0e0e0); font-size:1.1em;">📹 DVR Recordings</h3>
+                <div class="video-controls" style="margin-bottom:12px;">
+                    <div class="video-control-group">
+                        <label>Date</label>
+                        <select id="recDatePicker" onchange="window._loadRecSegments(this.value)">
+                            <option value="">Loading dates...</option>
+                        </select>
                     </div>
                 </div>
 
-                <!-- Character Edit Modal -->
-                <div class="video-char-modal-overlay" id="videoCharModal" style="display:none;"
-                    onclick="window._videoCloseCharModal(event)">
-                    <div class="video-char-modal">
-                        <div class="video-char-modal-header">
-                            <span id="videoCharModalTitle">New Character</span>
-                            <button onclick="window._videoCloseCharModal()">✕</button>
-                        </div>
-                        <div class="video-char-modal-body">
-                            <label>Name</label>
-                            <input type="text" id="videoCharName" placeholder="e.g. Maya" maxlength="50"
-                                autocomplete="off">
-                            <label>Description (for prompts)</label>
-                            <textarea id="videoCharDesc" rows="3"
-                                placeholder="e.g. Young woman, long black hair, brown eyes, red jacket, white t-shirt"></textarea>
-                            <label>Reference Images <span class="video-char-img-limit">(up to 4)</span></label>
-                            <div class="video-char-images" id="videoCharImages">
-                                <!-- Thumbnails populated by JS -->
-                            </div>
-                            <label class="video-char-upload-btn" id="videoCharUploadLabel">
-                                📷 Upload Image
-                                <input type="file" accept="image/*" id="videoCharUploadInput" style="display:none;"
-                                    onchange="window._videoCharUploadImage(this)">
-                            </label>
-                        </div>
-                        <div class="video-char-modal-footer">
-                            <button class="video-char-delete-btn" id="videoCharDeleteBtn"
-                                onclick="window._videoDeleteCharacter()" style="display:none;">🗑 Delete</button>
-                            <button class="video-char-save-btn" onclick="window._videoSaveCharacter()">Save</button>
-                        </div>
-                    </div>
+                <!-- Segment Grid -->
+                <div id="recSegmentGrid"
+                    style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px; margin-bottom:16px;">
+                    <div style="color:var(--text-secondary,#888); grid-column:1/-1; text-align:center; padding:20px;">
+                        Select a date to view recordings</div>
                 </div>
 
-                <div class="video-section" id="videoScriptSection">
-                    <div class="video-prompt-area">
-                        <textarea class="video-prompt-input" id="videoPrompt" rows="3"
-                            placeholder="Describe your video concept... e.g., 'A documentary about the rise of AI in everyday life'"></textarea>
+                <!-- Video Player -->
+                <div id="recPlayerWrap" style="display:none; margin-top:12px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                        <span id="recPlayerLabel" style="color:var(--text-primary,#e0e0e0); font-weight:600;"></span>
+                        <button onclick="window._closeRecPlayer()"
+                            style="background:none; border:1px solid var(--border,#444); color:var(--text-secondary,#aaa); border-radius:4px; padding:2px 10px; cursor:pointer;">✕
+                            Close</button>
                     </div>
-                    <div class="video-controls">
-                        <div class="video-control-group">
-                            <label>Duration</label>
-                            <select id="videoDuration">
-                                <option value="1">1 min</option>
-                                <option value="2">2 min</option>
-                                <option value="5" selected>5 min</option>
-                                <option value="10">10 min</option>
-                                <option value="15">15 min</option>
-                                <option value="20">20 min</option>
-                                <option value="30">30 min</option>
-                            </select>
-                        </div>
-                        <div class="video-control-group">
-                            <label>Image Model</label>
-                            <select id="videoModel">
-                                <option value="">Loading...</option>
-                            </select>
-                        </div>
-                        <div class="video-control-group">
-                            <label>Resolution</label>
-                            <select id="videoResolution">
-                                <option value="512x288" selected>512×288 (fast, VRAM safe)</option>
-                                <option value="768x432">768×432 (16:9)</option>
-                                <option value="1024x576">1024×576 (16:9, high VRAM)</option>
-                            </select>
-                        </div>
-                        <div class="video-control-group">
-                            <label class="video-checkbox-label">
-                                <input type="checkbox" id="videoSmooth"> Smooth motion (24fps interpolation, slower)
-                            </label>
-                        </div>
-                    </div>
-                    <div class="video-actions-row">
-                        <button class="video-btn video-btn-script" id="videoScriptBtn"
-                            onclick="window._videoGenerateScript()">📝 Generate Script</button>
-                        <button class="video-btn video-btn-produce" id="videoProduceBtn"
-                            onclick="window._videoProduceFull()" disabled>🎬 Produce Video</button>
-                        <button class="video-btn video-btn-clear" id="videoClearBtn"
-                            onclick="window._videoClearAll()">🗑 Clear All</button>
-                    </div>
-                </div>
-
-                <div class="video-script-editor" id="videoScriptEditor" style="display:none;">
-                    <div class="video-script-header">
-                        <span id="videoScriptTitle">Script</span>
-                        <span id="videoScriptInfo" class="video-script-info"></span>
-                    </div>
-                    <div class="video-scenes-list" id="videoScenesList"></div>
-                </div>
-
-                <div class="video-progress" id="videoProgress" style="display:none;">
-                    <div class="video-progress-header">
-                        <span id="videoProgressPhase">Phase</span>
-                        <button class="video-cancel-btn" id="videoCancelBtn" onclick="window._videoCancelPipeline()">✕
-                            Cancel</button>
-                    </div>
-                    <div class="video-progress-bar-container">
-                        <div class="video-progress-bar" id="videoProgressBar" style="width:0%"></div>
-                    </div>
-                    <span class="video-progress-text" id="videoProgressText">0%</span>
-                </div>
-
-                <div class="video-output" id="videoOutput">
-                    <div class="video-output-placeholder">
-                        <span class="placeholder-icon">🎬</span>
-                        <span>Enter a concept and generate a script to get started</span>
-                    </div>
-                </div>
-
-                <div class="video-history" id="videoHistory" style="display:none;">
-                    <div class="video-history-header">📁 Past Videos</div>
-                    <div class="video-history-list" id="videoHistoryList"></div>
+                    <video id="recPlayer" controls
+                        style="width:100%; max-height:500px; border-radius:8px; background:#000;"></video>
                 </div>
             </div>
-
-
         </div>
     </div>
 
@@ -627,34 +535,26 @@
         <div class="lightbox-counter" id="lightboxCounter"></div>
     </div>
 
-    <!-- Floating Creative Chat FAB + Modal -->
-    <button class="creative-fab" id="creativeFab" onclick="window._creativeOpenModal()" title="Creative Assistant">
-        🐬
-    </button>
-    <div class="creative-modal-overlay" id="creativeModalOverlay" style="display:none;"
-        onclick="window._creativeCloseModal(event)">
-        <div class="creative-modal">
-            <div class="creative-modal-header">
-                <span>🐬 Creative Assistant</span>
-                <span class="creative-modal-context" id="creativeModalContext">generate</span>
-                <button class="creative-modal-close" onclick="window._creativeCloseModal()">✕</button>
-            </div>
-            <div class="creative-chat-messages" id="creativeMessages">
-                <div class="creative-chat-welcome" id="creativeWelcome">Ask me to help craft prompts, styles, or ideas!
+
+    <!-- Clip Gallery Modal -->
+    <div class="gallery-modal-overlay" id="clipGalleryModal" style="display:none;"
+        onclick="if(event.target===this)window._closeClipGallery()">
+        <div class="gallery-modal">
+            <div class="gallery-modal-header">
+                <span class="gallery-modal-title">🎬 Clip Gallery</span>
+                <div class="gallery-modal-actions">
+                    <span id="clipGalleryCount" class="gallery-count"></span>
+                    <button class="gallery-modal-close" onclick="window._closeClipGallery()">✕</button>
                 </div>
             </div>
-            <div class="creative-chat-input-row">
-                <input type="text" id="creativeInput" class="creative-chat-input"
-                    placeholder="e.g. Write me a cinematic portrait prompt..."
-                    onkeydown="if(event.key==='Enter')window._creativeSendModal()">
-                <button class="creative-chat-send" onclick="window._creativeSendModal()">➤</button>
-            </div>
+            <div class="gallery-modal-body" id="clipGalleryBody"></div>
+            <div class="gallery-modal-footer" id="clipGalleryFooter" style="display:none;"></div>
         </div>
     </div>
 
     <script src="ai.js"></script>
     <script src="generate.js"></script>
-    <script src="video.js"></script>
+
 </body>
 
 </html>

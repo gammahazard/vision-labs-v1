@@ -3,7 +3,7 @@
 # PURPOSE:
 #   Runs the full Vision Labs stack on a single PC (RTX 3090):
 #   Redis, camera ingester, YOLO pose detector, vehicle detector, tracker,
-#   face recognizer, dashboard, Ollama (local LLM), ComfyUI, recorder, and piper TTS.
+#   face recognizer, dashboard, Ollama (local LLM), ComfyUI, and recorder.
 #
 # USAGE:
 #   docker compose up --build          # Start everything (first time)
@@ -205,7 +205,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     environment:
-      - OLLAMA_KEEP_ALIVE=4h
+      - OLLAMA_KEEP_ALIVE=5m
     volumes:
       - ollama-models:/root/.ollama
     deploy:
@@ -242,6 +242,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [ gpu ]
+    shm_size: '8gb'
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8188/system_stats')" ]
@@ -249,25 +250,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-
-  # ---------------------------------------------------------------------------
-  # Piper TTS — Local text-to-speech for video narration
-  # ---------------------------------------------------------------------------
-  # Lightweight TTS engine with natural-sounding voices.
-  # HTTP API at http://piper:10200 for the dashboard video pipeline.
-  piper:
-    image: rhasspy/wyoming-piper
-    command: --voice en_US-lessac-medium
-    volumes:
-      - piper-data:/data
-    ports:
-      - "10200:10200"
-    restart: unless-stopped
-    healthcheck:
-      test: [ "CMD", "python3", "-c", "import socket; s=socket.create_connection(('localhost',10200),2); s.close()" ]
-      interval: 30s
-      timeout: 5s
-      retries: 3
 
   # ---------------------------------------------------------------------------
   # Dashboard — Live monitoring UI
@@ -282,6 +264,7 @@ services:
       - "8080:8080"
     volumes:
       - ./contracts:/app/contracts:ro
+      - ./models/comfyui:/app/models:ro # WAN LoRA listing + model access
       - auth-data:/data
       - qnap-snapshots:/data/snapshots
       - qnap-events:/data/events
@@ -289,6 +272,8 @@ services:
       - qnap-generations:/data/generations
       - comfyui-data:/data/comfyui-output:ro
       - qnap-videos:/data/videos
+      - qnap-clips:/data/clips
+      - qnap-recordings:/data/recordings:ro
     environment:
       - CAMERA_ID=front_door
       - REDIS_HOST=redis
@@ -298,7 +283,7 @@ services:
       - AUTH_DB_PATH=/data/auth.db
       - OLLAMA_HOST=http://ollama:11434
       - COMFYUI_HOST=http://comfyui:8188
-      - PIPER_HOST=http://piper:10200
+
       - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
@@ -337,6 +322,61 @@ services:
       - TZ=${LOCATION_TIMEZONE:-America/Toronto}
     restart: unless-stopped
 
+  # ─── Monitoring Stack ───────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    network_mode: host
+    volumes:
+      - prometheus-data:/prometheus
+      - ./services/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.listen-address=:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    network_mode: host
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./services/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./services/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=visionlabs
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_SERVER_HTTP_PORT=3000
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    network_mode: host
+    environment:
+      - REDIS_ADDR=redis://127.0.0.1:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
+    network_mode: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    cap_add:
+      - SYS_ADMIN
+    restart: unless-stopped
+
 volumes:
   redis-data:
   face-data:
@@ -345,7 +385,11 @@ volumes:
   auth-data:
   ollama-models:
   comfyui-data:
-  piper-data:
+
+  prometheus-data:
+  grafana-data:
+
+  # QNAP NAS volumes — CIFS/SMB mounts to 192.168.1.250
   qnap-snapshots:
     driver: local
     driver_opts:
@@ -381,4 +425,10 @@ volumes:
     driver_opts:
       type: cifs
       device: //${QNAP_IP}/vision-labs/videos
+      o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"
+  qnap-clips:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //${QNAP_IP}/vision-labs/clips
       o: "addr=${QNAP_IP},username=${QNAP_USER},password=${QNAP_PASSWORD},file_mode=0777,dir_mode=0777"

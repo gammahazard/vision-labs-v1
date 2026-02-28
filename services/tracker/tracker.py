@@ -429,20 +429,19 @@ class PersonTracker:
 
     def _save_person_snapshot(self, timestamp: float, bbox: list = None) -> str | None:
         """
-        Grab the latest camera frame and save it to Redis for this person event.
-        Also saves the corresponding bbox so the dashboard can draw the box on
-        the correct frame (avoiding bbox/frame timing mismatches).
+        Grab the sub-stream frame and save it to Redis for this person event.
+        Uses the sub-stream (not HD) because the bbox coords come from the
+        pose detector running on the sub-stream — using the same frame
+        ensures the bbox aligns exactly with the person's position.
         Returns the Redis key or None if no frame available.
         Uses 2h TTL (matches dashboard snapshot cleanup).
         """
         try:
-            # Prefer HD frame for clearer snapshots
-            frame_bytes = self.r.get(HD_FRAME_KEY.encode())
-            if not frame_bytes:
-                # Fall back to latest sub-stream frame
-                entries = self.r.xrevrange(FRAME_STREAM.encode(), count=1)
-                if entries:
-                    frame_bytes = entries[0][1].get(b"frame") or entries[0][1].get(b"frame_bytes")
+            # Use sub-stream frame — same source as the detection bbox coords
+            frame_bytes = None
+            entries = self.r.xrevrange(FRAME_STREAM.encode(), count=1)
+            if entries:
+                frame_bytes = entries[0][1].get(b"frame") or entries[0][1].get(b"frame_bytes")
             if not frame_bytes:
                 return None
 

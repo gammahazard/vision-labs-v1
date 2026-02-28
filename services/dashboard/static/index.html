@@ -22,6 +22,7 @@
             <a href="/" class="nav-link nav-link--active">🏠 Home</a>
             <a href="/ai.html" class="nav-link">🤖 AI</a>
             <a href="/telegram.html" class="nav-link">🔐 Telegram</a>
+            <a href="/monitoring.html" class="nav-link">📊 Monitoring</a>
         </div>
     </div>
     <div class="navbar-stats">
@@ -404,37 +405,7 @@
             </div>
         </section>
 
-        <!-- Feedback Review Panel -->
-        <section class="panel feedback-panel collapsed" id="feedbackPanel">
-            <div class="panel-header" onclick="togglePanel(this)">
-                <h2>🧠 Feedback</h2>
-                <div style="display:flex;align-items:center;gap:6px;">
-                    <span class="face-count" id="feedbackCount">no data</span>
-                    <span class="panel-toggle">▼</span>
-                </div>
-            </div>
-            <div class="panel-body">
-                <!-- Stats -->
-                <div id="feedbackStatsContent">
-                    <div class="empty-state">Loading feedback stats…</div>
-                </div>
-                <!-- Suppression Rules -->
-                <div class="feedback-section">
-                    <h3 class="feedback-section-title">🛡️ Suppression Rules</h3>
-                    <p class="setting-hint">Auto-created rules that suppress repeat false alarms</p>
-                    <div id="suppressionRulesList">
-                        <div class="empty-state">Loading…</div>
-                    </div>
-                </div>
-                <!-- History -->
-                <div class="feedback-section">
-                    <h3 class="feedback-section-title">📜 Recent Verdicts</h3>
-                    <div id="feedbackHistoryList">
-                        <div class="empty-state">Loading…</div>
-                    </div>
-                </div>
-            </div>
-        </section>
+
     </aside>
 </main>
 
@@ -513,25 +484,7 @@
     </div>
 </div>
 
-<!-- Feedback Naming Modal -->
-<div id="feedbackNameModal" class="label-modal-overlay" style="display: none;">
-    <div class="label-modal">
-        <h3>👤 Name This Person</h3>
-        <img id="feedbackSnapshotPreview" src="" alt="Event snapshot"
-            style="width:100%; max-height:200px; object-fit:contain; border-radius:8px; margin-bottom:12px; display:none; background:#111; cursor:pointer;"
-            title="Click for full size" onclick="if(this.src) _openEventPhoto(this.src, 'Event snapshot')">
-        <p class="setting-hint" style="margin-bottom:12px">Enter a name for this detection event</p>
-        <div class="label-modal-options">
-            <label>Name:</label>
-            <input type="text" id="feedbackNameInput" placeholder="e.g. Neighbour Dave" class="label-modal-input"
-                maxlength="50">
-        </div>
-        <div class="label-modal-actions">
-            <button class="label-modal-save" id="feedbackNameSave" onclick="submitFeedbackName()">✅ Save</button>
-            <button class="label-modal-cancel" onclick="closeFeedbackNameModal()">✕ Cancel</button>
-        </div>
-    </div>
-</div>
+
 
 <!-- Event Detail Modal -->
 <div id="eventDetailModal" class="label-modal-overlay" style="display: none;">
@@ -571,7 +524,7 @@
 <script src="zones.js?v=7"></script>
 <script src="conditions.js?v=7"></script>
 <script src="browse.js?v=1"></script>
-<script src="feedback.js?v=4"></script>
+
 <script src="auth.js?v=6"></script>
 <script src="app.js?v=9"></script>
 </body>
