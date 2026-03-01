@@ -1,28 +1,25 @@
 # Vision Labs — AI-Powered Security Camera System
 
-> **Real hardware. Real-time inference. Self-learning alerts.**
+> **Real hardware. Real-time inference. Fully self-hosted.**
 
-An event-driven, microservices-based security camera system that detects people, tracks them across frames, recognizes known faces, and learns which alerts matter to you over time. Continuous DVR recording to a QNAP NAS with 28-day rolling retention. Includes AI-powered image generation, video production, and vision analysis. Runs entirely on a single PC with a GPU, orchestrated via Docker Compose.
+A single-machine security platform built on an RTX 3090 that processes a live RTSP camera feed through multiple AI models in real-time. Person detection, face recognition, vehicle tracking, and intelligent notifications — all running locally via Docker Compose with zero cloud dependencies.
 
 ---
 
 ## What It Does
 
-| Capability | How |
-|---|---|
-| **Live video feed** | RTSP camera -> Redis -> WebSocket -> browser, annotated with bounding boxes and keypoints |
-| **Person detection** | YOLOv8s-pose on GPU (~34ms per frame at 640x480) |
-| **Person tracking** | IoU-based matching assigns persistent IDs across frames |
-| **Action classification** | Standing, sitting, crouching, lying down, arms raised -- pure geometry on pose keypoints |
-| **Face recognition** | InsightFace `buffalo_l` generates 512-dim embeddings, cosine-matched against enrolled faces |
-| **Zone-based alerting** | Draw polygonal zones on the camera view, set time-based alert rules (always, night only, dead zone) |
-| **Telegram notifications** | Real-time photo alerts broadcast to all approved users, per-user bot commands, dashboard-managed access control |
-| **Vehicle detection** | YOLOv8s detects cars, trucks, buses, motorcycles — snapshot + event feed |
-| **Self-learning** | User feedback trains suppression rules — fewer false alarms over time |
-| **AI assistant** | Local Qwen 3 14B via Ollama — 22 tools: chat about events, query faces/weather/patterns, capture live snapshots and 5-second video clips in chat, send Telegram messages, schedule reminders, retrain suppression rules, activity heatmaps, record verdicts conversationally, show enrolled face photos, AI vision analysis |
-| **Image generation** | Stable Diffusion via ComfyUI — txt2img/img2img, LoRA support, batch generation, parameter sweeps with per-combo batch count, gallery with lightbox navigation, prompt history, creative chat (Dolphin model) |
-| **Video production** | WAN 2.1 i2v pipeline (primary) with AnimateDiff fallback — AI script generation (Ollama), SDXL keyframe → WAN animation (81 frames), character face conditioning (IPAdapter), WAN LoRA support, TTS narration (Piper), ffmpeg assembly, video history with delete |
-| **Vision analysis** | MiniCPM-V multimodal model via Ollama — describe camera snapshots, analyze uploaded images/videos |
+| Feature | Details |
+|---------|---------|
+| **Person detection** | YOLOv8s-pose detects people with keypoint-based action classification (standing, sitting, crouching, lying) |
+| **Face recognition** | InsightFace identifies known people — names stick to bounding boxes even when they turn away |
+| **Vehicle tracking** | YOLOv8s detects cars, trucks, buses, motorcycles with idle timer alerts |
+| **Telegram notifications** | Real-time photo alerts with AI scene descriptions, broadcast to all approved users |
+| **AI assistant** | Qwen 3 14B local LLM with 18 tool functions — query events, send alerts, capture snapshots, set reminders |
+| **Vision analysis** | MiniCPM-V multimodal model analyzes camera snapshots and user-uploaded images |
+| **Image generation** | ComfyUI + SDXL for on-device txt2img/img2img with LoRA support, batch generation, gallery |
+| **DVR recording** | Continuous 1-hour MP4 segments to QNAP NAS with 28-day rolling retention and browser playback |
+| **Zone management** | Draw detection/alert/dead zones on the camera view — configurable per time-of-day |
+| **System monitoring** | Prometheus + Grafana dashboards with GPU, Redis, and inference metrics |
 
 ---
 
@@ -30,450 +27,230 @@ An event-driven, microservices-based security camera system that detects people,
 
 ```
 Camera (RTSP)
-    |
-    v
-Ingester --> Redis Streams --> YOLO Pose Detector --> Tracker --> Events
-                           --> YOLO Vehicle Detector -------^
-                           --> InsightFace --> Face Identity
-                           --> Dashboard (WebSocket --> Browser)
-                           --> Telegram Notifications
-                           --> Ollama (Qwen 3 14B) --> AI Chat / Vision / Script
-    |                      --> ComfyUI (Stable Diffusion) --> Image Gen / WAN 2.1 i2v
-    |                      --> Piper (TTS) --> Video Narration
-    v
-Recorder --> ffmpeg (copy) --> QNAP NAS (MPEG-TS segments, 28-day rolling)
+    │
+    ▼
+Ingester ──▶ Redis Streams ──▶ YOLO Pose Detector ──▶ Tracker ──▶ Events
+                            ──▶ YOLO Vehicle Detector ────────────^
+                            ──▶ InsightFace ──▶ Face Identity
+                            ──▶ Dashboard (WebSocket ──▶ Browser)
+
+Events ──▶ Notification Poller ──▶ Telegram Bot API
+       ──▶ Event Journal (JSONL on QNAP NAS)
+
+Ollama (Qwen 3 14B + MiniCPM-V) ◀──▶ Dashboard AI Chat
+ComfyUI (SDXL) ◀──▶ Dashboard Image Generation
+Recorder ──▶ DVR segments on QNAP NAS ──▶ Dashboard Playback
 ```
 
-Eleven containerized services communicate through Redis Streams -- no direct inter-service calls (except dashboard -> face-recognizer REST proxy for enrollment, dashboard -> ComfyUI API for image/video generation, and dashboard -> Piper for TTS).
+### Services
 
-| Service | Purpose | GPU? |
-|---------|---------|------|
-| **redis** | Central message bus (streams + hashes) | No |
-| **camera-ingester** | RTSP decode -> JPEG -> Redis | No |
-| **pose-detector** | YOLOv8s-pose inference | Yes |
-| **tracker** | Person ID assignment + event generation | No |
-| **vehicle-detector** | YOLOv8s vehicle detection (car/truck/bus/motorcycle) | Yes |
-| **face-recognizer** | InsightFace embedding + enrollment API | Yes |
-| **dashboard** | FastAPI + WebSocket + static frontend | No |
-| **ollama** | Local LLM inference (Qwen 3 14B + Dolphin Mistral Nemo 12B + MiniCPM-V 2.6) | Yes |
-| **comfyui** | Stable Diffusion inference (SDXL + WAN 2.1 i2v + AnimateDiff fallback + GGUF) | Yes |
-| **piper** | Local text-to-speech (Wyoming protocol) | No |
-| **recorder** | Continuous DVR recording to QNAP NAS (ffmpeg) | No |
-
-> See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive -- service internals, Redis key map, data flow diagrams, and design decisions.
-
-### Why Redis Streams?
-
-- **Messaging + data storage** in one service
-- **Consumer groups** for horizontal scaling (spin up a second detector, they auto-share load)
-- **Persistence** -- if a service crashes, it catches up from stream history
-- **< 0.5ms latency** -- invisible to the pipeline
-- **Decoupled** -- adding a new worker is just reading from a stream
-
-### Fault Isolation
-
-Any service can fail independently:
-- Camera goes offline -> other cameras and pipeline are unaffected
-- Face recognizer crashes -> person detection continues, just no face labels
-- Redis restarts -> services auto-reconnect and resume from last message ID
+| Service | GPU | Purpose |
+|---------|:---:|---------|
+| **redis** | — | Central message bus — all inter-service communication via Redis Streams |
+| **camera-ingester** | — | Reads RTSP sub-stream (640×480) + main stream (HD), publishes JPEG frames to Redis |
+| **pose-detector** | ✅ | YOLOv8s-pose inference (~34ms), publishes person bounding boxes + keypoints |
+| **vehicle-detector** | ✅ | YOLOv8s inference, publishes vehicle bounding boxes (car/truck/bus/motorcycle) |
+| **tracker** | — | IoU matching across frames, assigns persistent IDs, publishes semantic events |
+| **face-recognizer** | ✅ | InsightFace embedding + SQLite enrollment DB, publishes identity matches |
+| **dashboard** | — | FastAPI backend + static frontend — WebSocket live view, REST APIs, background pollers |
+| **ollama** | ✅ | Local LLM server — Qwen 3 14B (chat + tools) and MiniCPM-V (vision) |
+| **comfyui** | ✅ | Stable Diffusion inference — SDXL txt2img/img2img with LoRA support |
+| **recorder** | — | ffmpeg RTSP→MP4 copy (no transcode), 1-hour segments, 28-day retention |
+| **prometheus** | — | Metrics collection (GPU, Redis, inference timing) |
+| **grafana** | — | Monitoring dashboards embedded in the system monitor page |
+| **redis-exporter** | — | Exports Redis metrics to Prometheus |
+| **dcgm-exporter** | — | Exports NVIDIA GPU metrics to Prometheus |
 
 ---
 
-## Quick Start
+## Requirements
 
-### Prerequisites
-
-- **NVIDIA GPU** (tested on RTX 3090, but any CUDA-capable GPU works)
-- [Docker Desktop](https://docs.docker.com/desktop/) with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+- **NVIDIA GPU** (tested on RTX 3090, any CUDA-capable GPU works)
+- [Docker](https://docs.docker.com/get-docker/) with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 - An **RTSP-capable IP camera** (tested with Reolink RLC-1240A over PoE)
+- **QNAP NAS** (optional — for snapshot/recording/event storage via CIFS mounts)
 
 ### Setup
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR_USERNAME/vision-labs.git
-cd vision-labs
+git clone https://github.com/gammahazard/vision-labs-v1.git
+cd vision-labs-v1
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env with your camera IP, password, and location coordinates
-# (location is used for sunrise/sunset-based alert timing)
+# Edit .env with your camera IP, credentials, Telegram bot token, etc.
 
-# 3. Launch everything
-docker compose up -d --build
+# 3. Build and run
+docker compose up --build
 
-# 4. Open dashboard
-# http://localhost:8080
-# Default login: admin / admin (change password on first login)
+# Dashboard at http://localhost:8080
 ```
 
 ### Environment Variables
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `CAMERA_IP` | Yes | Your IP camera's address on the local network |
-| `CAMERA_USER` | Yes | RTSP username (usually `admin`) |
-| `CAMERA_PASSWORD` | Yes | RTSP password |
-| `TELEGRAM_BOT_TOKEN` | No | Telegram bot for mobile push notifications |
-| `TELEGRAM_CHAT_ID` | No | Your Telegram chat ID (seeds the first admin user) |
-| `TELEGRAM_ALLOWED_USERS` | No | Comma-separated Telegram user IDs to seed on first startup |
-| `OPENWEATHER_API_KEY` | No | Weather data for the conditions panel |
-| `LOCATION_NAME` | No | Location label (e.g. "Home") |
+| Variable | Required | Description |
+|----------|:--------:|-------------|
+| `CAMERA_IP` | Yes | IP address of the RTSP camera |
+| `CAMERA_USER` | Yes | Camera login username |
+| `CAMERA_PASSWORD` | Yes | Camera login password |
+| `TELEGRAM_BOT_TOKEN` | No | Telegram bot token for notifications and commands |
+| `TELEGRAM_CHAT_ID` | No | Default Telegram chat ID for alerts |
+| `TELEGRAM_ALLOWED_USERS` | No | Comma-separated Telegram user IDs allowed to use the bot |
+| `OPENWEATHER_API_KEY` | No | OpenWeatherMap API key for conditions panel |
+| `LOCATION_NAME` | No | Location label shown in dashboard |
 | `LOCATION_LAT` | No | Latitude for sunrise/sunset calculations |
 | `LOCATION_LON` | No | Longitude for sunrise/sunset calculations |
 | `LOCATION_TIMEZONE` | No | IANA timezone (default: `America/Toronto`) |
-| `QNAP_IP` | No | QNAP NAS IP address for CIFS volume mounts |
-| `QNAP_USER` | No | QNAP NAS login username |
-| `QNAP_PASSWORD` | No | QNAP NAS login password |
-| `COMFYUI_URL` | No | ComfyUI API endpoint for image/video generation |
+| `QNAP_IP` | No | QNAP NAS IP for CIFS volume mounts |
+| `QNAP_USER` | No | QNAP login username |
+| `QNAP_PASSWORD` | No | QNAP login password |
 
 ---
 
-## Dashboard
+## Dashboard Pages
 
-The web dashboard is accessible from any device on your LAN at port 8080. No app installation -- works on desktop and mobile browsers.
+### Live View (`index.html`)
+The main page — shows the live camera feed with real-time overlays:
+- **Bounding boxes**: cyan for identified people, green for unknown, orange for vehicles
+- **Face labels**: recognized names displayed on bounding boxes with sticky identity (persists when face turns away)
+- **Action labels**: classified poses (standing, sitting, crouching, lying)
+- **Zone overlays**: drawn zones with color-coded alert levels
+- **Settings panel**: adjustable confidence threshold, IoU, lost timeout, FPS, notification cooldowns
+- **Event feed**: real-time detection events with inline snapshot photos
+- **Zone editor**: draw/edit/delete detection zones with per-time-period alert rules
+- **Face enrollment**: capture and label known people for recognition
+- **Browse panel**: vehicle snapshots organized by day + enrolled faces gallery
+- **Conditions panel**: current time period, sunrise/sunset, live weather
 
-### Features
+### AI Assistant (`ai.html`)
+Three-tab interface:
+- **Chat tab**: conversational AI assistant (Qwen 3 14B) with 18 tool functions for querying events, managing faces, sending Telegram messages, capturing snapshots/clips, setting reminders, and browsing vehicle history
+- **Vision tab**: upload images or capture live frames for MiniCPM-V analysis
+- **DVR tab**: browse and play back recorded camera footage by date/segment
 
-- **Live camera feed** -- real-time JPEG streaming via WebSocket with detection overlays, HD/SD stream toggle
-- **Bounding boxes** -- green for unknown, cyan for identified people, orange for vehicles, with action labels
-- **Keypoint overlay** -- 17-point COCO pose skeleton rendered on each person
-- **Event feed** -- scrolling list of detection events with inline face photo thumbnails
-- **Zone editor** -- draw polygonal zones directly on the camera feed with drag-to-edit vertices, set alert levels per zone
-- **Face enrollment wizard** -- guided multi-angle capture (front, left, right, up, down) with live oval face guide
-- **Telegram Access Manager** -- approve/revoke bot users from dashboard, access audit log, one-click enrollment from denied attempts
-- **Unknown faces gallery** -- auto-captured unknowns with one-click label/dismiss
-- **AI image generation** -- txt2img/img2img via ComfyUI, LoRA support, batch generation, gallery with lightbox + arrow navigation
-- **AI video production** -- script generation → scene animation → TTS narration → ffmpeg assembly, per-scene image attachment
-- **AI vision analysis** -- MiniCPM-V multimodal model for scene description, image/video analysis via chat
-- **Conditions panel** -- current time period (daytime/twilight/night), sunrise/sunset, live weather
-- **Settings** -- adjustable confidence, IoU threshold, lost timeout -- all hot-reload, no container restart needed
-- **Notifications** -- Telegram integration status and test button
-- **Authentication** -- session-based login with cookie auth, change password support
+### Image Generation (`ai.html` — Generate tab)
+ComfyUI-powered image generation:
+- Model/LoRA selection from mounted checkpoints
+- Prompt history with revision tracking
+- Batch generation and parameter sweep (steps × CFG × LoRA strength grid)
+- Image-to-image with denoise control
+- Gallery with lightbox preview and metadata import
+- VRAM management — auto-unloads Ollama models during generation
+
+### System Monitor (`monitoring.html`)
+- People count, inference time, GPU status, Redis memory cards
+- Embedded Grafana dashboard with adjustable time range
+- Fullscreen toggle
+
+### Telegram Access Manager (`telegram.html`)
+- Approve/revoke bot users with role-based access (admin/user)
+- Access log viewer showing all incoming bot interactions
+
+### Login (`login.html`)
+- Session-based authentication with blurred camera background
 
 ---
 
-## How People Are Tracked and Identified
+## Telegram Bot Commands
 
-### Detection Pipeline
+| Command | Description |
+|---------|-------------|
+| `/snapshot` | Send a live camera photo with AI scene description |
+| `/clip [N]` | Capture and send a video clip (5-40 seconds, default 5) with AI analysis |
+| `/status` | System health summary — services, GPU, people count, uptime |
+| `/arm` | Enable all notifications |
+| `/disarm` | Disable all notifications |
+| `/who` | Report who/what is currently in the camera frame |
+| `/events [N]` | Show recent detection events with snapshot images |
+| `/analyze` | Analyze the live camera frame with MiniCPM-V |
+| `/help` | List available commands |
+| *Send a photo* | Analyze any user-sent photo with MiniCPM-V vision model |
+
+All commands are audit-logged per user to QNAP NAS.
+
+---
+
+## AI Assistant Tools (18)
+
+The Qwen 3 14B model has access to these function-calling tools:
+
+| Tool | What it does |
+|------|-------------|
+| `query_events` | Search recent security events by type |
+| `query_events_by_date` | Search events for a specific date range |
+| `query_event_patterns` | Analyze detection patterns and trends |
+| `query_faces` | List enrolled people and recognition stats |
+| `query_unknowns` | List unidentified face captures |
+| `query_zones` | List configured detection zones |
+| `query_notification_history` | Recent Telegram notification log |
+| `query_activity_heatmap` | Hourly detection frequency breakdown |
+| `browse_vehicles` | Browse vehicle snapshots by date |
+| `get_live_scene` | Describe what's currently in the camera frame |
+| `get_system_status` | System health and resource usage |
+| `get_weather` | Current weather conditions |
+| `capture_snapshot` | Take and send a camera snapshot |
+| `capture_clip` | Record and send a short video clip |
+| `send_telegram` | Send a message to Telegram |
+| `schedule_reminder` | Set a timed reminder |
+| `show_faces` | Display enrolled face photos inline |
+| `analyze_image` | Analyze a specific image with MiniCPM-V |
+
+---
+
+## Data Flow
+
+### Redis Streams (real-time pipeline)
 
 ```
-Frame arrives from camera (15 FPS)
-  -> YOLO detects person bounding boxes + 17 keypoints
-  -> Tracker matches boxes across frames via IoU overlap
-  -> Person confirmed after 15 stable frames (~1s debounce)
-  -> Action classified from keypoint geometry (no ML -- pure math)
-  -> Events emitted: person_appeared, person_left, action_changed
+frames:front_door          ← Ingester publishes JPEG frames (sub-stream)
+detections:pose:front_door ← Pose detector publishes person bboxes + keypoints
+detections:vehicle:front_door ← Vehicle detector publishes vehicle bboxes
+events:front_door          ← Tracker publishes semantic events
+identities:front_door      ← Face recognizer publishes identity matches
 ```
 
-### Face Recognition Pipeline
+### Redis Keys (state)
 
 ```
-Simultaneously for each detected person:
-  -> Upper body cropped from frame
-  -> InsightFace detects face and generates 512-dim embedding
-  -> Embedding compared against all enrolled faces (cosine similarity)
-  -> If similarity > threshold: identity published to Redis
-  -> Tracker links name to person ID
-  -> If no match: face auto-saved as "unknown" for later labeling
+state:front_door           ← Tracker: current scene snapshot (who's in frame)
+identity_state:front_door  ← Face recognizer: current recognized faces
+config:front_door          ← Dashboard: live config (thresholds, cooldowns)
+zones:front_door           ← Dashboard: zone definitions
+frame_hd:front_door        ← Ingester: latest HD frame (for snapshots)
+gpu:generation_active      ← Dashboard: GPU lock flag during image generation
+telegram:users             ← Dashboard: approved Telegram users
+telegram:access_log        ← Bot commands: access audit trail
+person_snapshot:*           ← Tracker: detection-time frame captures (2h TTL)
+vehicle_snapshot:*          ← Tracker: vehicle detection snapshots (24h TTL)
 ```
 
-### Sticky Identity
-
-Once a face is recognized, the name stays on the bounding box even when the person turns away from the camera. A 10-frame vote buffer with 2x bias for the current identity prevents flicker.
-
-### Unknown Face Management
-
-Faces that don't match anyone enrolled are automatically saved with deduplication -- the system groups repeated sightings of the same unknown (cosine similarity > 0.6). From the dashboard you can:
-- **Label** an unknown to promote it to a known face (triggers re-enrollment + retroactive cleanup)
-- **Dismiss** individual unknowns or clear all
-
----
-
-## Zone-Based Alerting
-
-Draw polygonal zones on the camera view and assign alert behaviors:
-
-| Alert Level | Behavior |
-|-------------|----------|
-| **Always** | Alert in all time periods |
-| **Night Only** | Alert only during night and late night |
-| **Log Only** | Record events, never send notifications |
-| **Ignore** | Skip alerting, still track people |
-| **Dead Zone** | Completely suppress -- no tracking, no events, no bounding boxes |
-
-### Time-Based Rules
-
-Sunrise and sunset times are calculated daily using the [`astral`](https://github.com/sffjunkie/astral) library based on your configured coordinates in `.env`. Four time periods:
-
-| Period | Window |
-|--------|--------|
-| **Daytime** | Sunrise + 30min -> Sunset - 30min |
-| **Twilight** | +/- 30 min around sunrise and sunset |
-| **Night** | Sunset + 30min -> Midnight |
-| **Late Night** | Midnight -> Sunrise - 30min |
-
-Dead zones are useful for suppressing detections on neighbor property or public sidewalks where you want zero tracking.
-
----
-
-## Notification System
-
-When configured with a Telegram bot token, the system sends real-time alerts with camera snapshots:
-
-| Event | Rate Limited? | Includes |
-|-------|---------------|----------|
-| Person detected | Yes (1/min) | Camera snapshot (4s grace period if suppress_known is on) |
-| Person identified | No | Camera snapshot + name |
-| Vehicle idle | Yes (1/min) | Camera snapshot |
-| Face enrolled | No | Face thumbnail |
-
----
-
-## Self-Learning Feedback Loop (Phase 6.5)
-
-**The system starts by alerting on everything, then learns from your feedback to filter noise.** No ML retraining — a deterministic rule engine builds suppression rules from your verdict patterns.
-
-### How It Works
-
-Every Telegram notification includes three inline buttons:
-- **✅ Real Alert** — confirms this was a genuine detection
-- **❌ Not Needed** — marks as false alarm (drives rule creation)
-- **🏷️ Tag** — identify the person (delivery, neighbor, shadow, etc.)
-
-You can also classify events from the **dashboard review queue** with thumbnails, or ask the AI assistant to retrain rules at any time.
-
-### Auto-Suppression Rules
-
-The engine creates rules automatically from accumulated `false_alarm` verdicts:
-
-| Rule Type | Threshold | Example | Effect |
-|-----------|-----------|---------|--------|
-| **Identity** | 3 false alarms | "Mail Carrier" marked false 3× | All future alerts for that person suppressed |
-| **Zone + Time** | 5 false alarms | "Driveway" + "daytime" marked false 5× | All alerts in that zone during that time period suppressed |
-
-Suppression is checked **before** the rate-limit timer — suppressed events don't burn your notification cooldown window. Rules can be toggled on/off or deleted from the dashboard at any time, and `retrain` wipes and rebuilds all rules from scratch.
-
-> **No YOLO or InsightFace retraining.** Those are frozen foundation models. The suppression engine is a thin decision layer on top that learns your personal alert preferences.
-
-### Known Limitations
-
-- **Night override** — all suppression rules are bypassed during **night and late_night** time periods. Any person detected at those hours always triggers a notification, even if they're a known suppressed identity. Dead zones still apply 24/7 (enforced at the tracker level, not the notification layer).
-- **No action awareness** — zone+time rules don't consider what the person is doing (crouching vs walking). Rules suppress all actions equally.
-- **No negative feedback loop** — marking "Real Threat" confirms the alert was valid but doesn't strengthen future alerts for similar patterns. Only false alarms drive rule creation.
-- **Progression is emergent, not explicit** — there are no formal "stages." The system naturally sends fewer notifications as rules accumulate, but there's no stage-tracking or mode-switching logic.
-
----
-
-## Full Roadmap
-
-| Phase | What | Status |
-|-------|------|--------|
-| Phase 0 | Hardware setup -- camera, network, NAS | Done |
-| Phase 1 | Camera ingester + Redis Streams (15 FPS) | Done |
-| Phase 2 | YOLOv8s-pose detection + IoU tracker | Done |
-| Phase 3 | Live dashboard + WebSocket streaming | Done |
-| Phase 4 | Action classification from pose keypoints | Done |
-| Phase 5 | Face recognition + enrollment wizard + unknown gallery | Done |
-| Phase 6 | Zone editor + time-based alert rules + Telegram notifications | Done |
-| Phase 6.1 | Dashboard authentication (login, sessions, password change) | Done |
-| Phase 6.2 | Vehicle detection (car/truck/bus/motorcycle) + event feed | Done |
-| Phase 6.5 | Self-learning feedback loop (Telegram buttons, review queue, suppression rules) | Done |
-| Phase 7 | AI assistant -- Ollama + Qwen 3 14B, onboarding wizard, chat UI, 22 tools | Done |
-| Phase 7.5 | Telegram Access Manager -- per-user auth, enrollment flow, access log, dashboard page | Done |
-| Phase 8 | Extended bot commands + AI tools -- /zones, /rules, /night, /faces, /timelapse, /analyze, photo analysis, activity heatmap, record_verdict, show_faces, analyze_image | Done |
-| Phase 9 | QNAP NAS storage -- DVR recording, event journal, Telegram audit trail | Done |
-| Phase 10 | AI image generation -- ComfyUI + SDXL, txt2img/img2img, LoRA, batch generation, gallery | Done |
-| Phase 11 | AI vision analysis -- MiniCPM-V 2.6 multimodal model, image/video description in chat | Done |
-| Phase 12 | AI video production -- WAN 2.1 i2v pipeline (SDXL keyframe → WAN animation, 81 frames, FP8 quantized), AnimateDiff fallback, WAN LoRA support, script generation, TTS narration (Piper), ffmpeg assembly | Done |
-
-### Phase 7: AI Assistant
-
-A local Qwen 3 14B model (via Ollama, ~9.3 GB) adds natural language capabilities:
-- **Chat interface** -- dark-themed UI with onboarding wizard, suggestion chips, markdown + inline image rendering
-- **22 tools** -- query events/events by date/patterns/activity heatmap, faces/unknowns/show face photos, live scene, capture snapshot (with weather + scene description), capture 5-second video clip in chat, get weather, browse vehicles, zones, notification history, feedback stats, review feedback, retrain rules, send Telegram (text/snapshot/clip), schedule reminders, system status, record verdicts conversationally, analyze image (MiniCPM-V)
-- **Creative chat** -- Dolphin Mistral Nemo 12B model for uncensored creative text generation (prompt refinement, storytelling)
-- **VRAM management** -- auto-unload Ollama models before image/video generation, GPU pause flag pauses pose/vehicle detectors during generation to prevent CUDA conflicts
-- **Runs entirely on-device** -- no cloud APIs, no data leaves the machine
-- **Extensibility roadmap** -- see ARCHITECTURE.md for 3-tier plan (smarter context → proactive intelligence → autonomous operation)
-
-### Phase 8: Extended Bot Commands & AI Tools
-
-Expanded Telegram bot and AI assistant capabilities:
-- **8 new bot commands** -- `/zones` (snapshot with zone overlays), `/rules` (suppression rules + stats), `/night` (night override status), `/faces` (enrolled people), `/timelapse [YYYY-MM-DD]` (MP4 from day's snapshots), `/events` (with snapshot thumbnails), `/analyze` (AI vision analysis of live frame), `/ask` (ask AI assistant from Telegram)
-- **Photo analysis** -- send any photo to the bot and get AI vision analysis via MiniCPM-V
-- **4 new AI tools** -- `query_activity_heatmap` (day×hour cross-tabulation), `record_verdict` (conversational event classification), `show_faces` (display enrolled photos in chat), `analyze_image` (vision analysis)
-- **Night override awareness** -- `/night` command shows current period and active override status
-- **AI learning loop** -- `record_verdict` allows conversational feedback ("mark that as false alarm") while keeping the AI read-only on rule modification
-- **GPU pause coordination** -- image/video generation sets a Redis flag (`gpu:generation_active`) that pauses pose and vehicle detector inference, preventing CUDA memory conflicts
-
-### QNAP NAS Storage (Phase 9)
-
-All persistent data stored on the QNAP TS-431X2 NAS (5.2 TB) via Docker CIFS/SMB volumes:
-
-| Data | Location | Retention |
-|------|----------|-----------|
-| DVR recordings | `/recordings/front_door/YYYY-MM-DD/HH-MM.ts` | 28 days (auto-cleanup) |
-| Event snapshots | `/snapshots/{event_id}.jpg` | Indefinite |
-| Event journal | `/events/YYYY-MM-DD.jsonl` | Indefinite |
-| Telegram audit trail | `/telegram/@username/commands.jsonl` | Indefinite |
-| Telegram snapshots | `/telegram/@username/snapshots/*.jpg` | Indefinite |
-| Telegram clips | `/telegram/@username/clips/*.mp4` | Indefinite |
-
-The DVR recorder uses `ffmpeg -c copy` (zero transcode) to remux the RTSP sub-stream H.264 + AAC audio into MPEG-TS segments via ffmpeg's segment muxer. MPEG-TS is crash-safe — segments are playable even if the recorder is interrupted. Very low CPU usage.
-
-### Data Retention Policy
-
-| Data | Storage | Location | Retention |
-|------|---------|----------|-----------|
-| **DVR video + audio** | QNAP NAS | `/recordings/front_door/YYYY-MM-DD/HH-MM.ts` | 28 days (auto-cleanup every 6 hours) |
-| **Event snapshots** | QNAP NAS | `/snapshots/{event_id}.jpg` | Indefinite |
-| **Event journal** | QNAP NAS | `/events/YYYY-MM-DD.jsonl` | Indefinite |
-| **Telegram command log** | QNAP NAS | `/telegram/@username/commands.jsonl` | Indefinite |
-| **Telegram snapshots** | QNAP NAS | `/telegram/@username/snapshots/*.jpg` | Indefinite |
-| **Telegram clips** | QNAP NAS | `/telegram/@username/clips/*.mp4` | Indefinite |
-| **Face embeddings** | Local Docker volume | SQLite (`face-data`) | Indefinite (enrolled faces persist forever) |
-| **Unknown face crops** | Local Docker volume | `face-data/unknowns/*.jpg` | Indefinite |
-| **User feedback** | Local Docker volume | SQLite (`auth-data/feedback.db`) | Indefinite |
-| **AI chat history** | Local Docker volume | SQLite (`auth-data/ai.db`) | Indefinite |
-| **Suppression rules** | Local Docker volume | SQLite (`auth-data/feedback.db`) | Indefinite (until manually deleted) |
-| **Detection events (live)** | Redis stream | `vision:events` | ~10,000 entries (Redis maxlen, rolling) |
-| **Camera frames** | Redis hash | `vision:frame:*` | Overwritten each frame (~67ms lifespan) |
-| **Tracking state** | Redis hashes | `vision:tracks:*` | Evicted after 5s inactivity |
-
-### Future (All Just Redis Workers)
-
-- License plate reader (YOLO + PaddleOCR)
-- Vehicle re-identification (same car tracking across visits)
-- Cross-camera person tracking
-- TensorRT optimization for higher throughput
-- Additional cameras (zero code changes -- just add a docker-compose entry)
-
----
-
-## Tech Stack
-
-| Layer | Technology | Why |
-|-------|-----------|-----|
-| Message bus | Redis Streams | Pub/sub + persistence + cache in one |
-| Backend API | FastAPI + Uvicorn | Async, WebSocket support, fast |
-| Frontend | Vanilla HTML/JS/CSS + WebSocket | Lightweight, no build step |
-| Pose detection | YOLOv8s-pose (Ultralytics) | Keypoints + bounding box in one model |
-| Face recognition | InsightFace buffalo_l | 512-dim embeddings, cosine matching |
-| Image generation | Stable Diffusion XL via ComfyUI | txt2img/img2img, LoRA support |
-| Video animation | WAN 2.1 14B (FP8) via ComfyUI | Image-to-video (81 frames), AnimateDiff fallback |
-| Vision model | MiniCPM-V 2.6 via Ollama | Multimodal image/video understanding |
-| Text-to-speech | Piper (Wyoming protocol) | Local TTS for video narration |
-| Time rules | astral | Sunrise/sunset from coordinates, no internet |
-| Database | SQLite (faces + auth) | Embedded, zero-config |
-| Containers | Docker Compose | One service per container |
-| GPU runtime | NVIDIA Container Toolkit + CUDA 12.1 | Required for PyTorch + ONNX Runtime GPU acceleration |
-
-### GPU Memory Budget
-
-| Model | VRAM |
-|-------|------|
-| YOLOv8s-pose | ~500 MB |
-| YOLOv8s (vehicles) | ~500 MB |
-| InsightFace buffalo_l | ~600 MB |
-| Qwen 3 14B (Ollama) | ~9,300 MB |
-| Dolphin Mistral Nemo 12B (Ollama) | ~7,500 MB |
-| MiniCPM-V 2.6 (Ollama) | ~5,500 MB |
-| Stable Diffusion XL (ComfyUI) | ~6,500 MB |
-| WAN 2.1 14B FP8 (ComfyUI) | ~14,000 MB |
-| WAN umt5_xxl text encoder | ~9,000 MB |
-| WAN VAE + CLIP Vision | ~1,500 MB |
-| AnimateDiff motion model (fallback) | ~1,700 MB |
-| IPAdapter face model | ~1,500 MB |
-| **Max theoretical** | **~58.6 GB** |
-
-> **Note:** Not all models run simultaneously. Ollama swaps models on demand (only one of Qwen 3 / MiniCPM-V / Dolphin loaded at a time). ComfyUI loads models on demand — during video production, WAN 2.1 FP8 uses ~18 GB peak (diffusion + text encoder + VAE + CLIP Vision). SDXL loads only for keyframe generation, then unloads before WAN loads. GPU services (pose/vehicle detectors) automatically pause inference during generation via a Redis `GPU_PAUSE_KEY` flag, preventing CUDA memory conflicts. Realistic peak during WAN video generation: ~18 GB (fits RTX 3090 24 GB).
-
----
-
-## Project Structure
+### NAS Storage (QNAP CIFS mounts)
 
 ```
-vision-labs/
-|-- .env.example                  # Environment template (copy to .env)
-|-- docker-compose.yml            # All 11 services orchestrated
-|-- ARCHITECTURE.md               # Full technical deep dive
-|
-|-- contracts/                    # Shared API contracts (mounted read-only into services)
-|   |-- __init__.py               # Package docstring
-|   |-- streams.py                # Redis key templates + data schemas
-|   |-- actions.py                # Pose-based action classifier (geometry, no ML)
-|   +-- time_rules.py             # Sunrise/sunset + zone alert evaluation
-|
-|-- services/
-|   |-- camera-ingester/          # RTSP decode -> JPEG -> Redis
-|   |-- pose-detector/            # YOLOv8s-pose inference (GPU)
-|   |-- tracker/                  # Person ID assignment + event publishing
-|   |-- face-recognizer/          # InsightFace + enrollment REST API (GPU)
-|   |-- vehicle-detector/         # YOLOv8s vehicle detection (GPU)
-|   |-- recorder/                 # DVR recording to QNAP NAS (ffmpeg)
-|   |-- comfyui/                  # Stable Diffusion XL + WAN 2.1 i2v + AnimateDiff (GPU)
-|   +-- dashboard/                # FastAPI backend + static frontend
-|       |-- server.py             # App factory, WebSocket handler, middleware (~1182 lines)
-|       |-- feedback_db.py        # Feedback + suppression rules (SQLite, ~581 lines)
-|       |-- ai_db.py              # AI config + reminders + chat history (SQLite, ~236 lines)
-|       |-- routes/               # Modular API endpoints (events, faces, zones, auth, feedback, ai, telegram, image_gen, video_pipeline)
-|       +-- static/               # HTML/JS/CSS (no build step, no framework)
-|           |-- index.html         # Dashboard (live feed, sidebar panels, ~578 lines)
-|           |-- ai.html            # AI assistant + image gen + vision + video (~673 lines)
-|           |-- telegram.html      # Telegram Access Manager (users + access log, ~339 lines)
-|           +-- login.html         # Authentication page (~1005 lines)
-|
-+-- tests/                        # Unit + integration tests (no GPU/Redis required)
-    |-- test_actions.py           # Action classification from keypoints
-    |-- test_time_rules.py        # Sunrise/sunset + time period logic
-    |-- test_face_db.py           # Face database operations
-    |-- test_feedback_db.py       # Feedback + suppression rule tests
-    |-- test_tracker.py           # IoU matching + person tracking
-    |-- test_routes.py            # Dashboard API endpoint tests
-    |-- test_vehicles.py          # Vehicle pipeline tests
-    |-- test_notifications.py     # Notification logic tests
-    +-- test_scene_analysis.py    # Scene analysis + description tests
+/data/snapshots/           ← Person detection snapshots (per-event)
+/data/snapshots/vehicles/  ← Vehicle detection snapshots (organized by day)
+/data/events/              ← Event journal (daily JSONL files)
+/data/telegram/            ← Per-user Telegram command audit trail
+/data/recordings/          ← DVR recordings (1-hour MP4 segments)
+/data/generations/         ← AI-generated images (ComfyUI output)
+/data/clips/               ← Captured video clips
 ```
 
 ---
 
-## Design Principles
+## Contracts
 
-1. **Single source of truth** -- all Redis keys and data schemas live in `contracts/`, shared across services via read-only volume mount
-2. **Loose coupling** -- services communicate only through Redis Streams, never direct HTTP calls (except enrollment proxy)
-3. **Hot-reload config** -- change detection confidence, IoU threshold, or lost timeout from the dashboard; services pick up changes from Redis without restarting
-4. **Fault isolation** -- any service can crash, restart, or be rebuilt without affecting the rest of the pipeline
-5. **Privacy first** -- all processing is 100% local, no cloud APIs for detection/recognition, dead zones for neighbor property
-6. **Modular scaling** -- adding a camera = one docker-compose entry, adding a new detector = one new file that reads from a stream
+Shared code lives in `contracts/` and is mounted read-only into every service:
 
----
-
-## Running Tests
-
-```bash
-# Install test dependencies
-pip install pytest
-
-# Run all tests
-pytest tests/ -v
-```
-
-Tests cover action classification, time rules, face database operations, tracker algorithms, and API routes -- all without requiring GPU or Redis.
-
----
-
-## Adding a Camera
-
-Zero code changes required:
-
-1. Connect camera, assign static IP
-2. Add a new ingester service in `docker-compose.yml` with `CAMERA_ID` and `RTSP_URL`
-3. `docker compose up -d camera-ingester-2`
-4. Dashboard auto-discovers the new camera via Redis
+| File | Purpose |
+|------|---------|
+| `streams.py` | Redis stream/key name templates — single source of truth |
+| `actions.py` | Keypoint-based action classification (standing, sitting, crouching, lying) |
+| `time_rules.py` | Time period calculation, zone alert rules, point-in-polygon test |
 
 ---
 
 ## License
 
-MIT
+This project is for personal/educational use.

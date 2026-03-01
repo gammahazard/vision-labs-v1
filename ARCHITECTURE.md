@@ -1,225 +1,143 @@
 # Vision Labs — Architecture Reference
 
-> **Last updated:** Feb 27, 2026
-> **Status:** Phases 0–12 complete. 22-tool AI assistant. Image generation (SDXL + LoRA + parameter sweeps). Video production (WAN 2.1 i2v + AnimateDiff fallback + TTS + characters). Vision analysis (MiniCPM-V). Telegram Access Manager. Extended bot commands (15 commands + photo analysis). DVR recording + QNAP NAS storage. GPU pause coordination for detector/generation VRAM safety.
-> **Hardware:** RTX 3090 PC (24 GB VRAM), Reolink RLC-1240A (PoE), Cisco switch, QNAP NAS.
-
-This document is the definitive reference for how the system works. If you lose context, start here.
+> **Last updated:** Feb 28, 2026
 
 ---
 
 ## Table of Contents
 
 1. [System Overview](#system-overview)
-2. [Architecture Diagram](#architecture-diagram)
-3. [Service Inventory](#service-inventory)
-4. [Redis Key Map](#redis-key-map)
-5. [Data Flow — End to End](#data-flow--end-to-end)
-6. [Shared Contracts](#shared-contracts)
-7. [Service Deep Dives](#service-deep-dives)
-8. [Dashboard Deep Dive](#dashboard-deep-dive)
-9. [Frontend Deep Dive](#frontend-deep-dive)
-10. [Inter-Service Communication](#inter-service-communication)
-11. [Hot-Reload Config System](#hot-reload-config-system)
-12. [Authentication System](#authentication-system)
-13. [Notification System](#notification-system)
-14. [Docker Infrastructure](#docker-infrastructure)
-15. [Test Suite](#test-suite)
-16. [Current Status vs v2.md Plan](#current-status-vs-v2md-plan)
-17. [Phase 6.5: Self-Learning](#phase-65-self-learning-feedback-loop-implemented)
-18. [Modularity & Security Principles](#modularity--security-principles)
-19. [Extensibility Roadmap](#extensibility-roadmap)
+2. [Service Map](#service-map)
+3. [Data Flow Pipelines](#data-flow-pipelines)
+4. [Redis Schema](#redis-schema)
+5. [Dashboard Backend](#dashboard-backend)
+6. [Dashboard Frontend](#dashboard-frontend)
+7. [Tracker Service](#tracker-service)
+8. [Face Recognition](#face-recognition)
+9. [AI Assistant](#ai-assistant)
+10. [Image Generation](#image-generation)
+11. [Notification System](#notification-system)
+12. [Telegram Bot](#telegram-bot)
+13. [DVR Recording](#dvr-recording)
+14. [Zone System](#zone-system)
+15. [Monitoring Stack](#monitoring-stack)
+16. [Shared Contracts](#shared-contracts)
+17. [Authentication](#authentication)
+18. [NAS Storage Layout](#nas-storage-layout)
+19. [Docker Infrastructure](#docker-infrastructure)
 20. [File Index](#file-index)
-
----
-
-## Hardware Inventory
-
-| Device | Role | Connection |
-|--------|------|------------|
-| **PC (RTX 3090)** | All services — inference, Redis, dashboard, tracker | NIC 1 → modem (internet, 192.168.2.x), NIC 2 → switch (camera LAN, 192.168.1.x) |
-| **Reolink RLC-1240A** | 12MP PoE IP camera, RTSP stream source | PoE injector → switch |
-| **Cisco Unmanaged Switch** | Connects all LAN devices | Central hub |
-| **60W PoE++ Injector** | Powers the Reolink camera (~13W draw) | Between switch and camera |
-| **QNAP NAS (TS-431X2)** | Video archive, event storage (5.2 TB) | Ethernet → switch |
-
-### Static IP Plan
-
-| Device | IP (static) | Subnet |
-|--------|------------|--------|
-| PC NIC 1 (WAN) | `192.168.2.1` | Internet via modem |
-| PC NIC 2 (LAN) | `192.168.1.x` | Camera/NAS network |
-| Reolink 1240A | `192.168.2.10` | RTSP camera feed |
-| QNAP NAS | `192.168.1.250` | Storage / archive |
 
 ---
 
 ## System Overview
 
-Vision Labs is an **AI-powered security camera system** built as event-driven microservices over Redis Streams. A single Reolink PoE camera provides an RTSP video feed that flows through a pipeline:
-
-```
-Camera (RTSP) → Ingester → Redis → YOLO Pose → Tracker → Events
-                                  → InsightFace → Identities
-                                  → Dashboard (WebSocket → Browser)
-                                  → Telegram Notifications
-```
-
-**Key design principles:**
-- **Single source of truth:** All Redis keys and data schemas defined in `contracts/`
-- **Loose coupling:** Services communicate only via Redis streams/hashes — no direct calls (except dashboard → face-recognizer HTTP proxy)
-- **Hot-reload:** Config changes from the dashboard propagate via Redis — no restarts needed
-- **Fault isolation:** Any service can crash without taking down the pipeline
-- **GPU budget:** YOLOv8s-pose (~500 MB) + YOLOv8s vehicles (~500 MB) + InsightFace buffalo_l (~600 MB) + Qwen 3 14B (~9.3 GB) + WAN 2.1 FP8 (~18 GB peak) + SDXL (~6.5 GB) + MiniCPM-V (~5.5 GB) — not all loaded simultaneously. Ollama swaps models, ComfyUI loads on demand (WAN and SDXL never co-loaded), detectors auto-pause during generation via `GPU_PAUSE_KEY`. Peak during WAN video gen: ~18 GB (fits RTX 3090 24 GB)
-
----
-
-## Architecture Diagram
+Vision Labs is an **event-driven microservice system** running on a single machine (RTX 3090) via Docker Compose. A Reolink PoE camera provides an RTSP video feed that flows through a pipeline of AI models, with results displayed in a web dashboard and sent as Telegram notifications.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  PC (RTX 3090) — Everything runs here via Docker Compose             │
 │                                                                      │
 │  ┌─────────────────┐                                                 │
-│  │ camera-ingester  │──RTSP──→ Reolink RLC-1240A (192.168.2.10)     │
-│  │ (host network)   │                                                │
-│  └────────┬────────┘                                                 │
-│           │ XADD frames:front_door                                   │
-│           ▼                                                          │
-│  ┌────────────────┐                                                  │
-│  │     Redis       │ (port 6379, bridge network)                     │
-│  │  Streams+Hashes │                                                 │
-│  └───┬────┬────┬──┘                                                  │
-│      │    │    │                                                      │
-│      │    │    └──────────────────────────────────┐                   │
-│      │    │                                      │                   │
-│      ▼    ▼                                      ▼                   │
-│  ┌──────────────┐  ┌──────────────────┐  ┌──────────────────┐        │
-│  │pose-detector │  │    tracker       │  │ face-recognizer  │        │
-│  │ (GPU, YOLO)  │  │ (CPU, IoU match) │  │ (GPU, InsightFace│        │
-│  │              │  │                  │  │  + REST API :8081)│        │
-│  └──────┬───────┘  └────────┬─────────┘  └────────┬─────────┘        │
-│         │                   │                     │                  │
-│         │ detections:pose:  │ events:front_door   │ identity_state:  │
-│         │ front_door        │ state:front_door    │ front_door       │
-│         │                   │                     │                  │
-│         └───────────────────┴─────────────────────┘                  │
-│                             │                                        │
-│                     ┌───────▼────────┐                               │
-│                     │   dashboard    │                                │
-│                     │  (FastAPI :8080)│──HTTP proxy──→ face-recognizer│
-│                     │  WebSocket /ws │                                │
-│                     │  Static files  │                                │
-│                     └───────┬────────┘                               │
-│                             │                                        │
-│                     ┌───────▼────────┐   ┌──────────────┐            │
-│                     │    Browser     │   │   Telegram    │            │
-│                     │ (any LAN device│   │   Bot API    │            │
-│                     │  :8080)        │   │  (HTTPS)     │            │
-│                     └────────────────┘   └──────────────┘            │
+│  │  Camera (RTSP)  │──(sub-stream 640×480)──▶ Ingester ──▶ Redis     │
+│  │  Reolink PoE    │──(main-stream HD)──────▶ Ingester ──▶ Redis     │
+│  └─────────────────┘                                                 │
+│                                                                      │
+│  Redis Streams ──▶ Pose Detector (YOLOv8s-pose, GPU)                 │
+│                ──▶ Vehicle Detector (YOLOv8s, GPU)                   │
+│                ──▶ Face Recognizer (InsightFace, GPU)                 │
+│                         │                                            │
+│                         ▼                                            │
+│                    Tracker (CPU) ──▶ Events Stream                   │
+│                                                                      │
+│           ┌───────────────────────────────┐                          │
+│           │         Dashboard             │                          │
+│           │  FastAPI :8080                 │                          │
+│           │  WebSocket /ws (live frames)   │                          │
+│           │  REST API /api/*              │                          │
+│           │  Static frontend              │──▶ Telegram Bot API      │
+│           │  Background pollers           │                          │
+│           └───────────────────────────────┘                          │
+│                    │              │                                   │
+│            Ollama (LLM)    ComfyUI (SDXL)                           │
+│            Qwen 3 14B      Image generation                         │
+│            MiniCPM-V                                                 │
+│                                                                      │
+│  Recorder ──(ffmpeg copy)──▶ QNAP NAS (DVR segments)                │
+│  Prometheus + Grafana ──▶ System monitoring                          │
 └──────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                     ┌──────────────┐
-                     │  QNAP NAS    │ (192.168.1.250)
-                     │  DVR + Events│
-                     │  + Snapshots │
-                     └──────────────┘
 ```
 
 ---
 
-## Service Inventory
+## Service Map
 
-| Service | Container | Port | GPU? | Purpose |
-|---------|-----------|------|------|---------|
-| **redis** | vision-labsv1-redis-1 | 6379 | No | Central message bus (streams + hashes) |
-| **camera-ingester** | vision-labsv1-camera-ingester-1 | — | No | RTSP decode → JPEG → Redis |
-| **pose-detector** | vision-labsv1-pose-detector-1 | — | Yes | YOLOv8s-pose inference |
-| **tracker** | vision-labsv1-tracker-1 | — | No | Person tracking + event generation |
-| **vehicle-detector** | vision-labsv1-vehicle-detector-1 | — | Yes | YOLOv8s vehicle detection |
-| **face-recognizer** | vision-labsv1-face-recognizer-1 | 8081 | Yes | InsightFace embedding + REST API |
-| **dashboard** | vision-labsv1-dashboard-1 | 8080 | No | FastAPI + WebSocket + static frontend |
-| **ollama** | vision-labsv1-ollama-1 | 11434 | Yes | Local LLM inference (Qwen 3 14B + Dolphin Mistral Nemo 12B + MiniCPM-V 2.6) |
-| **comfyui** | vision-labsv1-comfyui-1 | 8188 | Yes | Stable Diffusion XL + WAN 2.1 i2v (FP8) + AnimateDiff fallback + GGUF quantization |
-| **piper** | vision-labsv1-piper-1 | 10200 | No | Local text-to-speech (Wyoming protocol) |
-| **recorder** | vision-labsv1-recorder-1 | — | No | DVR recording to QNAP NAS (ffmpeg remux) |
-
----
-
-## Redis Key Map
-
-All keys defined in `contracts/streams.py`. The function `stream_key(template, **kwargs)` resolves placeholders.
-
-| Key | Type | Producer | Consumer(s) | Data Shape |
-|-----|------|----------|-------------|------------|
-| `frames:{camera_id}` | Stream | camera-ingester | pose-detector, vehicle-detector, face-recognizer, dashboard | `{frame: JPEG bytes, timestamp: float, frame_number: int, resolution: "WxH"}` |
-| `detections:pose:{camera_id}` | Stream | pose-detector | tracker, face-recognizer | `{detections: JSON[{bbox, confidence, keypoints}], inference_ms, frame_number}` |
-| `events:{camera_id}` | Stream | tracker | dashboard, notification poller | `{event_type, person_id, timestamp, duration, direction, action, zone, alert_level, alert_triggered, identity_name}` |
-| `state:{camera_id}` | Hash | tracker | dashboard WebSocket | `{num_people, people: JSON[{person_id, bbox, action, ...}]}` |
-| `config:{camera_id}` | Hash | dashboard | pose-detector, tracker | `{confidence_thresh, iou_threshold, lost_timeout, target_fps}` |
-| `zones:{camera_id}` | Hash | dashboard | tracker, dashboard overlay | `{zone_id: JSON{name, points, alert_level}}` |
-| `identities:{camera_id}` | Stream | face-recognizer | dashboard | `{identities: JSON[{name, bbox, confidence}]}` |
-| `identity_state:{camera_id}` | Hash | face-recognizer | tracker, dashboard | `{identities: JSON[{name, bbox, confidence}]}` |
-| `detections:vehicle:{camera_id}` | Stream | vehicle-detector | tracker | `{detections: JSON[{bbox, confidence, class_name, class_id}], detector_type: "vehicle", inference_ms, frame_bytes}` |
-| `vehicle_snapshot:{camera_id}:{ts}` | String (TTL 24h) | tracker | dashboard | Raw JPEG bytes |
-| `frame_hd:{camera_id}` | String (TTL 5s) | camera-ingester (HD thread) | dashboard (HD toggle) | Raw JPEG bytes of main stream frame |
-| `telegram:users` | Hash | dashboard (seed + CRUD) | bot_commands, notifications | `{user_id: JSON{chat_id, name, username, approved_at}}` |
-| `telegram:access_log` | Stream (maxlen 500) | bot_commands (poller) | dashboard (Telegram page) | `{user_id, username, first_name, last_name, language_code, chat_id, action, authorized, timestamp}` |
-| `gpu:generation_active` | String (TTL 300-600s) | dashboard (image_gen, video_pipeline) | pose-detector, vehicle-detector | Flag key — when present, detectors pause inference to free GPU for generation |
-| `person_snapshot:{camera_id}:{ts}` | String (TTL 2h) | tracker | dashboard, notifications | Raw JPEG bytes — person event snapshot |
-| `detection_frame:{detector_type}:{camera_id}` | String (overwritten) | pose-detector, vehicle-detector | dashboard WebSocket | The exact JPEG frame each detector last processed — ensures bbox/frame alignment |
-
-**Default camera_id:** `front_door`
+| Service | Container | Port | GPU | Description |
+|---------|-----------|------|:---:|-------------|
+| **redis** | redis:7-alpine | 6379 | — | Central message bus, AOF persistence, 2GB maxmemory |
+| **camera-ingester** | custom | host | — | RTSP→JPEG frames, publishes sub-stream + HD to Redis |
+| **pose-detector** | custom | — | ✅ | YOLOv8s-pose on GPU, publishes person bboxes + keypoints |
+| **vehicle-detector** | custom | — | ✅ | YOLOv8s on GPU, publishes vehicle bboxes |
+| **tracker** | custom | — | — | IoU-based person/vehicle tracking, event publishing |
+| **face-recognizer** | custom | 8081 | ✅ | InsightFace embedding, SQLite DB, REST API |
+| **dashboard** | custom | 8080 | — | FastAPI + WebSocket + static files + background tasks |
+| **ollama** | ollama/ollama | 11434 | ✅ | LLM inference (Qwen 3 14B, MiniCPM-V) |
+| **comfyui** | custom | 8188 | ✅ | Stable Diffusion image generation |
+| **recorder** | custom | host | — | RTSP→MP4 ffmpeg copy, 1-hour segments |
+| **prometheus** | prom/prometheus | 9090 | — | Metrics collection, 30d retention |
+| **grafana** | grafana/grafana-oss | 3000 | — | Monitoring dashboards |
+| **redis-exporter** | redis_exporter | host | — | Redis metrics → Prometheus |
+| **dcgm-exporter** | dcgm-exporter | host | ✅ | NVIDIA GPU metrics → Prometheus |
 
 ---
 
-## Data Flow — End to End
+## Data Flow Pipelines
 
-### Frame Pipeline (every ~67ms at 15 FPS)
+### Detection Pipeline (real-time, ~15 FPS)
 
 ```
-1. CAMERA → RTSP H.264 sub-stream (640×480)
-2. camera-ingester:
-   - cv2.VideoCapture reads frame
-   - JPEG encode (quality 80)
-   - XADD frames:front_door {frame, timestamp, frame_number, resolution}
-   - Stream capped at 1000 entries (MAXLEN)
+1. camera-ingester:
+   - OpenCV reads RTSP sub-stream (640×480, 15 FPS)
+   - JPEG encode each frame
+   - XADD to frames:front_door (capped at 1000 entries)
+   - Separate thread: reads main stream, SET to frame_hd:front_door
 
-3. pose-detector (consumer group "pose_detectors"):
+2. pose-detector (consumer group "detectors"):
    - XREADGROUP from frames stream
-   - Decode JPEG → numpy array
    - YOLOv8s-pose inference (~34ms on RTX 3090)
    - Filter: person class only, confidence > threshold
+   - SET detection_frame:pose:front_door = the frame JPEG used
    - XADD detections:pose:front_door {detections: JSON, inference_ms}
 
+3. vehicle-detector (consumer group "vehicle_detectors"):
+   - Same pattern as pose-detector
+   - Classes: car, truck, bus, motorcycle
+   - SET detection_frame:vehicle:front_door = frame used
+   - XADD detections:vehicle:front_door
+
 4. tracker (consumer group "trackers"):
-   - XREADGROUP from detections stream
-   - IoU matching against tracked persons
-   - If new person: debounce 15 frames (~1s), then emit person_appeared
+   - XREADGROUP from detections:pose + detections:vehicle
+   - IoU matching against tracked persons/vehicles
+   - If new person: debounce, then emit person_appeared
    - If person gone > lost_timeout: emit person_left
-   - Action classification via contracts/actions.py (debounced 10 frames, sticky 2x)
-   - Zone evaluation: point_in_polygon + should_alert (time-based)
-   - Dead zone: completely suppress — no tracking, no events
-   - XADD events:front_door
-   - HSET state:front_door
+   - If face recognized: emit person_identified
+   - If vehicle stationary > idle_timeout: emit vehicle_idle
+   - HSET state:front_door with current scene snapshot
+   - XADD events:front_door {event_type, person_id, bbox, zone, ...}
+   - SET person_snapshot:{camera}:{ts} = frame JPEG at detection time (2h TTL)
 
-5. face-recognizer (consumer group "face_recognizers"):
-   - XREADGROUP from detections stream (separate group from tracker)
-   - For each detected person bbox: crop upper 50% → InsightFace
-   - If face found: generate 512-dim embedding, cosine match against SQLite
-   - If match > 0.5: publish identity
-   - If unknown with det_score >= 0.75: auto-save to unknowns table
+5. face-recognizer:
+   - XREADGROUP from frames stream
+   - InsightFace detection + embedding extraction
+   - Compare against SQLite DB of enrolled faces
+   - HSET identity_state:front_door with matches
    - XADD identities:front_door
-   - HSET identity_state:front_door
 
-6. dashboard (WebSocket /ws/live):
-   - GET detection_frame:{detector}:{camera} (synced frame from detector)
-   - Fallback: XREVRANGE frames (latest 1) if no detection frame cached
-   - XREVRANGE detections (latest 1)
-   - HGETALL state + identity_state
-   - Draw bounding boxes (cyan=identified, green=unknown, orange=vehicle)
-   - Draw keypoints, zone overlays
+6. dashboard WebSocket (/ws):
+   - Read latest frame from detection_frame:pose:front_door
+   - Read state:front_door for current persons/vehicles
+   - Read identity_state:front_door for face labels
+   - Read zones:front_door for zone overlays
+   - Draw bounding boxes, keypoints, face labels, zone overlays
    - JPEG encode → base64 → send JSON via WebSocket
    - Target: 10 FPS to browser
 ```
@@ -227,823 +145,465 @@ All keys defined in `contracts/streams.py`. The function `stream_key(template, *
 ### Event Notification Flow
 
 ```
-1. tracker emits person_appeared or person_identified to events stream
-2. dashboard background poller (_event_notification_poller):
+1. tracker emits event to events:front_door
+2. dashboard _event_notification_poller (background thread):
    - XREAD events stream (blocking, in threadpool executor)
-   - ALWAYS on person_appeared/person_identified/vehicle_detected/vehicle_idle: save snapshot JPEG to /data/snapshots/{event_id}.jpg
-   - Snapshot bbox alignment: uses `snapshot_bbox` from event (matches saved frame) instead of live `bbox` to prevent mismatch
-   - If Telegram configured + person_appeared: rate-limited (1 per 60s, with debug logging when skipped), send Telegram photo with bbox + feedback buttons
-   - If Telegram configured + person_identified + suppress_known OFF: send Telegram photo (not rate-limited)
-   - If Telegram configured + vehicle_idle: rate-limited (1 per 60s, with debug logging), send Telegram photo with bbox (no follow-up clip)
-   - Old snapshots auto-cleaned every ~200s (files older than 2 hours)
-3. Dashboard frontend shows snapshot thumbnails in the event feed
-4. Telegram receives photo + HTML-formatted caption (when configured)
-5. All events journaled to daily JSONL files on QNAP NAS (`/data/events/YYYY-MM-DD.jsonl`)
+   - For each event:
+     a. Save snapshot JPEG to /data/snapshots/ (always)
+     b. Journal event to /data/events/YYYY-MM-DD.jsonl (always)
+     c. If Telegram configured and not rate-limited:
+        - Draw bbox on HD frame
+        - Run MiniCPM-V scene description
+        - Build caption (event type, time, zone, AI description)
+        - Broadcast photo to all approved Telegram users
 ```
 
-### Face Enrollment Flow (user-initiated)
+### Face Recognition Flow
 
 ```
-1. User types name in wizard, clicks Capture
+1. face-recognizer runs InsightFace on each frame
+2. For each detected face: extract 512-dim embedding
+3. Compare against all enrolled faces in SQLite (cosine similarity)
+4. If similarity > 0.5: publish identity to identity_state:{camera}
+5. Tracker reads identity_state, links name to tracked person_id
+6. Dashboard reads identity_state, draws name labels on bboxes
+7. Sticky identity: once recognized, name persists even when face turns away
+   (10-frame vote buffer with 2x bias for current identity prevents flicker)
+```
+
+### Face Enrollment Flow
+
+```
+1. User types name in dashboard wizard, clicks Capture
 2. Browser → POST /api/faces/enroll {name}
-3. Dashboard proxy → face-recognizer:8081/api/faces/enroll
-4. face-recognizer:
+3. Dashboard proxies to face-recognizer:8081/api/faces/enroll
+4. Face-recognizer:
    - XREVRANGE frames (latest 1) → full frame
-   - XREVRANGE detections (latest 1) → person bboxes
-   - Pick largest person bbox
+   - Pick largest person bbox from current detections
    - Crop upper 50% → InsightFace → embedding + portrait thumbnail
-   - SQLite INSERT into known_faces (name, embedding, photo)
-   - Sweep unknowns for matches → clear any that match
-   - Return {success, face_id, name}
-5. Dashboard sends Telegram notification with face photo
-6. Wizard shows captured photo, auto-advances to next angle
+   - INSERT into SQLite: {name, embedding_blob, portrait_jpeg}
+   - Return success + face_id
 ```
 
 ---
 
-## Shared Contracts
+## Redis Schema
 
-**Location:** `contracts/` — mounted into every container via Docker Compose volume.
+### Streams
 
-### contracts/streams.py
-- All Redis key templates as string constants
-- `stream_key(template, **kwargs)` — resolves `{camera_id}`, `{detector_type}` placeholders
-- Dataclasses: `FrameMessage`, `DetectionMessage`, `EventMessage` — document expected schemas
+| Key Pattern | Producer | Consumer | Payload |
+|-------------|----------|----------|---------|
+| `frames:{camera_id}` | camera-ingester | pose-detector, vehicle-detector, face-recognizer | `{frame, timestamp, frame_number, width, height}` |
+| `detections:pose:{camera_id}` | pose-detector | tracker | `{detections: JSON, inference_ms, timestamp}` |
+| `detections:vehicle:{camera_id}` | vehicle-detector | tracker | `{detections: JSON, inference_ms, timestamp}` |
+| `events:{camera_id}` | tracker | dashboard poller | `{event_type, person_id, bbox, zone, alert_level, ...}` |
+| `identities:{camera_id}` | face-recognizer | dashboard | `{identities: JSON}` |
+| `telegram:access_log` | bot_commands | dashboard (Telegram page) | `{user_id, username, action, authorized, timestamp}` |
 
-### contracts/actions.py
-- `classify_action(keypoints: list) → str` — pure math on 17 COCO keypoints
-- Actions: `standing`, `sitting`, `crouching`, `lying_down`, `arms_raised`
-- Uses hip-ankle ratios, knee angles, torso orientation, wrist-shoulder positions
-- No ML model — just geometry
+### Keys (state)
 
-### contracts/time_rules.py
-- `get_time_period(dt) → str` — returns `daytime`, `twilight`, `night`, `late_night`
-- `should_alert(zone_alert_level, current_period) → bool` — evaluates zone rules
-- `point_in_polygon(x, y, polygon) → bool` — ray-casting PIP test
-- Uses `astral` library for sunrise/sunset, location configured via `LOCATION_LAT`/`LOCATION_LON` env vars
-- Time periods: daytime (sunrise+30min → sunset-30min), twilight (±30min around sunrise/sunset), night (sunset+30min → midnight), late_night (midnight → sunrise-30min)
+| Key Pattern | Writer | Reader | Content |
+|-------------|--------|--------|---------|
+| `state:{camera_id}` | tracker | dashboard WebSocket | `{num_people, people: JSON[{person_id, bbox, action}]}` |
+| `identity_state:{camera_id}` | face-recognizer | dashboard WebSocket | `{face_id: {name, confidence, bbox}}` |
+| `config:{camera_id}` | dashboard settings | pose-detector, tracker, vehicle-detector | `{confidence_thresh, iou_threshold, lost_timeout, ...}` |
+| `zones:{camera_id}` | dashboard zone editor | tracker, dashboard overlay | `{zone_id: JSON{name, points, alert_level}}` |
+| `frame_hd:{camera_id}` | camera-ingester | dashboard (snapshots) | Raw JPEG bytes (HD frame) |
+| `detection_frame:{type}:{camera_id}` | pose/vehicle detector | dashboard WebSocket | Raw JPEG bytes (the frame bboxes were computed from) |
+| `person_snapshot:{camera_id}:{ts}` | tracker | dashboard event feed | Raw JPEG bytes (2-hour TTL) |
+| `vehicle_snapshot:{camera_id}:{ts}` | tracker | dashboard browse/events | Raw JPEG bytes (24-hour TTL) |
+| `gpu:generation_active` | image_gen | pose-detector, vehicle-detector | Lock flag — detectors pause GPU when present |
+| `telegram:users` | dashboard (Telegram Access Manager) | bot_commands | `{user_id: JSON{chat_id, name, role, approved_at}}` |
 
----
+### Config Keys (in `config:{camera_id}`)
 
-## Service Deep Dives
-
-### camera-ingester (`services/camera-ingester/ingester.py`)
-
-**~363 lines.** Single file, no dependencies beyond OpenCV + Redis.
-
-- **RTSP connection:** Uses sub-stream (640×480) for AI inference; optional HD thread reads main stream and caches latest frame in Redis for a live HD toggle
-- **Frame throttling:** `cap.grab()` discards frames between captures to hit TARGET_FPS
-- **Stream capping:** `XADD ... MAXLEN 1000` prevents Redis from growing unbounded
-- **Reconnect:** Exponential backoff (1s → 2s → 4s → ... → 30s max) on RTSP failure
-- **Docker:** `network_mode: host` to reach camera on `192.168.2.10`
-- **Graceful shutdown:** SIGTERM/SIGINT handlers release OpenCV capture
-
-### pose-detector (`services/pose-detector/detector.py`)
-
-**~388 lines.** GPU service.
-
-- **Model:** YOLOv8s-pose (auto-downloaded on first run, cached in Docker volume `yolo-models`)
-- **Consumer group:** `pose_detectors` — can run multiple instances for load balancing
-- **Inference:** ~34ms on RTX 3090 at 640×480
-- **Output:** For each person: `{bbox: [x1,y1,x2,y2], confidence: float, keypoints: [[x,y,conf]×17]}`
-- **Hot-reload:** Reads `confidence_thresh` from `config:{camera_id}` every 25 frames
-- **YOLO clip_boxes bug:** Documented in v2.md — x-coords clamp to height instead of width
-
-### vehicle-detector (`services/vehicle-detector/detector.py`)
-
-**~321 lines.** GPU service. Mirrors pose-detector architecture.
-
-- **Model:** YOLOv8s (general object detection, auto-downloaded, cached in Docker volume `yolo-models`)
-- **Consumer group:** `vehicle_detectors` — reads from same frame stream as pose-detector
-- **Class filter:** COCO classes 2 (car), 3 (motorcycle), 5 (bus), 7 (truck) — filtered at inference time
-- **Confidence threshold:** 0.35 default (env `CONFIDENCE_THRESH`; hot-reloaded from Redis `vehicle_confidence_thresh`)
-- **Min bbox area:** 2500 px² default (env `MIN_VEHICLE_BBOX_AREA`) — discards tiny reflections/distant objects
-- **Frame skip:** Default 3 (processes every 3rd frame to save GPU for fast-moving vehicles)
-- **Output:** For each vehicle: `{bbox: [x1,y1,x2,y2], confidence: float, class_name: str, class_id: int}`
-- **Snapshot:** Includes raw frame bytes in detection message for tracker to save as vehicle snapshot
-- **VRAM:** ~500 MB on RTX 3090
-
-### tracker (`services/tracker/tracker.py`)
-
-**~955 lines.** CPU-only, most complex service.
-
-**Core algorithm:**
-- Maintains a dict of `TrackedPerson` objects, each with: person_id, bbox, first_seen, last_seen, action, action_history, confirmed (bool)
-- Every detection frame: compute IoU matrix between all current persons and new detections
-- Greedy assignment: highest IoU match > threshold → update person; unmatched detections → new person
-- Person confirmed after 15 stable frames (~1 second debounce; prevents phantom detections)
-
-**Action classification:**
-- Calls `contracts/actions.py` for each person each frame
-- Maintains per-person action vote buffer (10 frames)
-- Sticky bias: current action needs 2× opposite votes to change (prevents oscillation)
-- Emits `action_changed` event with `prev_action`
-
-**Zone evaluation:**
-- Loads zones from `zones:{camera_id}` every 10 seconds
-- Tests person bbox center against each zone polygon via `point_in_polygon()`
-- Dead zones: if person center is inside a dead zone, completely suppress (delete TrackedPerson, no event)
-- Alert evaluation: `should_alert(zone.alert_level, current_time_period)` → sets `alert_triggered` on event
-
-**Identity integration:**
-- Reads `identity_state:{camera_id}` every 2 seconds
-- Matches face-recognizer identity bboxes to tracked persons via IoU
-- Once matched: emits `person_identified` event (fires only once per person per identity assignment)
-- **Identity grace period (suppress_known):** When `suppress_known` is enabled in dashboard config, `person_appeared` announcements are deferred by 4 seconds. If face recognition identifies the person as known within that window, the notification is suppressed entirely. If the grace period expires and the person remains unknown, the notification fires normally.
-- Identity name propagated to all subsequent events for that person
-
-**Vehicle tracking:**
-- Reads from `detections:vehicle:{camera_id}` stream (separate from person detections)
-- IoU matching (threshold 0.2) against tracked vehicles: `TrackedVehicle` objects track bbox, class_name, first_seen, duration
-- **Idle detection:** Vehicle must be (a) tracked for ≥90 seconds (`VEHICLE_IDLE_TIMEOUT`) AND (b) stationary (bbox center drift <30px across last 20 frames). Passing vehicles that move through the frame never trigger idle.
-- `center_history`: each TrackedVehicle records its center position every frame (ring buffer of 20); `is_stationary` checks max displacement from first center
-- Snapshot saved at first detection (frame + bbox stored in Redis with 24h TTL)
-- Events: `vehicle_detected` (rate-limited 1 per 3s), `vehicle_idle` (once per vehicle, only if stationary)
-- Stale vehicles pruned after `VEHICLE_LOST_TIMEOUT` (10s) of not being seen
-
-**Snapshot bbox alignment:**
-- For person events (`person_appeared`, `person_identified`): the tracker saves the HD frame AND the corresponding bbox as a companion Redis key (`{snap_key}:bbox`)
-- The event includes `snapshot_bbox` — the bbox that matches the saved snapshot frame
-- The dashboard uses `snapshot_bbox` (not the live `bbox`) when drawing annotations, preventing bbox/frame timing mismatches
-
-**Hot-reload config:**
-- Reads `iou_threshold`, `lost_timeout`, `vehicle_idle_timeout`, `suppress_known` from Redis config every 10 messages
-
-### face-recognizer (`services/face-recognizer/recognizer.py` + `face_db.py`)
-
-**~731 + ~462 lines.** GPU service + SQLite DB + REST API.
-
-**Dual role:**
-1. **Background loop** — reads detections, crops faces, matches embeddings, publishes identities
-2. **REST API (port 8081)** — enrollment, preview, unknowns management (called by dashboard proxy)
-
-**InsightFace pipeline:**
-- Model: `buffalo_l` (RetinaFace detector + ArcFace recognizer)
-- Crops upper 50% of person bbox for face detection
-- Generates 512-dimensional normalized embedding
-- Cosine similarity matching against all enrolled faces
-- Match threshold: 0.5 default (constructor parameter on `FaceDB`)
-
-**face_db.py (FaceDB class):**
-- SQLite with WAL mode, in-memory embedding cache for fast matching
-- Tables: `known_faces` (id, name, embedding 2048 bytes, photo JPEG), `unknown_faces` (auto-captured)
-- `enroll(name, embedding, photo)` → INSERT + cache update
-- `match(embedding) → (name, face_id, similarity)` — cosine against all cached embeddings
-- `save_unknown(embedding, photo)` — dedup: if >0.6 similar to existing unknown, just bump sighting_count
-- `label_unknown(uid, name)` → move from unknown to known (promotes embedding)
-- `reconcile_unknowns()` — startup sweep: clear unknowns that match any known face
-- Max 100 unknowns, oldest pruned when exceeded
-
-**Face thumbnail (enrollment photo):**
-- Detects face within upper torso crop
-- Applies 120% horizontal + 100% vertical padding around face bbox
-- Crops from full frame (not head region) for natural portrait look
-- Resizes to 200×200 JPEG
-
-### recorder (`services/recorder/recorder.py`)
-
-**~232 lines.** CPU-only, single file.
-
-- **Purpose:** Continuous DVR recording of the RTSP sub-stream to the QNAP NAS
-- **Method:** `ffmpeg -c copy` — zero-transcode remux of H.264 into MPEG-TS container (crash-safe — segments are playable even if interrupted)
-- **Transport:** RTSP over TCP for reliability
-- **Segment duration:** 1 hour (3600s, configurable via `SEGMENT_DURATION`)
-- **Storage layout:** `/recordings/{camera_id}/YYYY-MM-DD/HH-MM.ts` — filenames reflect actual recording start time
-- **Retention:** 28-day rolling cleanup (every 6 hours, removes entire day folders that are older than cutoff)
-- **Reconnect:** Exponential backoff (5s → 10s → 20s → ... → 60s max) on RTSP failure
-- **Graceful shutdown:** SIGTERM/SIGINT handlers terminate the ffmpeg subprocess
-- **CPU usage:** Negligible — no decoding or transcoding, just remuxes the raw stream
-- **Docker:** `network_mode: host` to reach camera RTSP directly
+| Field | Default | Description |
+|-------|---------|-------------|
+| `confidence_thresh` | `0.5` | YOLO detection confidence minimum |
+| `iou_threshold` | `0.3` | IoU overlap threshold for tracking |
+| `lost_timeout` | `5.0` | Seconds before marking person as left |
+| `target_fps` | `5` | Target FPS for WebSocket streaming |
+| `notify_person` | `1` | Enable person detection notifications |
+| `notify_vehicle` | `1` | Enable vehicle detection notifications |
+| `suppress_known` | `0` | Suppress notifications for recognized people |
+| `notify_cooldown` | `60` | Seconds between person notifications |
+| `vehicle_cooldown` | `60` | Seconds between vehicle notifications |
+| `vehicle_confidence_thresh` | `0.35` | Vehicle detection confidence minimum |
+| `vehicle_idle_timeout` | `90` | Seconds before vehicle idle alert |
 
 ---
 
-## Dashboard Deep Dive
+## Dashboard Backend
 
-### Backend (`services/dashboard/server.py`)
+### `server.py` (1178 lines)
 
-**~1139 lines.** FastAPI with modular routes.
+The main FastAPI application:
 
-**Startup sequence:**
-1. Initialize auth SQLite database (create default admin/admin if empty)
-2. Write default config to Redis if not present
-3. Initialize feedback database (self-learning suppression rules)
-4. Initialize AI assistant database (config, reminders, chat history)
-5. Start background event notification poller (async task)
-6. Start Telegram bot command poller (callback queries + commands)
-7. Start reminder poller (checks every 60s for due AI-scheduled reminders)
-8. Pull + warm up Ollama AI model in background (`think=False`, `keep_alive="4h"`)
-9. Mount static files, include all route modules
+| Component | Lines | Purpose |
+|-----------|-------|---------|
+| `auth_middleware` | 240-261 | Session-based auth, redirects unauthenticated to login |
+| `login_background` | 267-299 | Heavily blurred camera snapshot for login page (no auth) |
+| `startup` | 305-346 | Init auth DB, write default config, start background tasks |
+| `_reminder_poller` | 349-386 | Check due reminders every 60s, send via Telegram |
+| `_ensure_ollama_model` | 389-448 | Pull Qwen 3 14B on first startup, warm-up GPU load |
+| `_clear_comfyui_queue_on_startup` | 451-486 | Clear stale GPU locks from previous session |
+| `_event_notification_poller` | 488-766 | Poll events, save snapshots, journal, send Telegram |
+| `websocket_live` | 772-1162 | Stream frames with overlays at 10 FPS |
 
-**WebSocket `/ws/live`:**
-- Reads latest frame + detections + state + identities every ~100ms
-- Draws bounding boxes with OpenCV (cyan for identified, green for unknown)
-- Draws keypoint dots (orange, confidence > 30%)
-- Draws zone overlays (semi-transparent colored polygons)
-- Sticky identity cache: once a face is matched to a tracker person_id, the name persists even when face isn't visible
-- Encodes annotated frame as JPEG → base64 → JSON → WebSocket
+### Route Modules (20 files in `routes/`)
 
-**Auth middleware:**
-- Every HTTP request checked for `vl_session` cookie
-- Exempt paths: `/login.html`, `/api/auth/login`, `/api/auth/status`, `/style.css`, `/auth.js`
-- Invalid session: redirect to `/login.html` (browser) or 401 (API)
-
-### Route Modules (`services/dashboard/routes/`)
-
-| Module | Endpoints | Purpose |
-|--------|-----------|---------|
-| `auth.py` | `POST /api/auth/login`, `POST /api/auth/logout`, `POST /api/auth/change-password`, `GET /api/auth/status` | SQLite-backed auth with signed cookie sessions |
-| `events.py` | `GET /api/events?count=N`, `GET /api/events/{id}/snapshot` | Event feed from Redis stream + camera snapshot JPEGs from disk |
-| `config.py` | `GET /api/config`, `POST /api/config`, `GET /api/stats` | Read/write detector+tracker config, system stats |
-| `conditions.py` | `GET /api/conditions` | Time period (astral), sunrise/sunset, weather (OpenWeatherMap 15min cache) |
-| `faces.py` | `GET /api/faces`, `POST /api/faces/preview`, `POST /api/faces/enroll`, `DELETE /api/faces/{id}`, `GET /api/faces/{id}/photo` | Proxy to face-recognizer :8081 |
-| `unknowns.py` | `GET /api/unknowns`, `GET /api/unknowns/{id}/photo`, `POST /api/unknowns/{id}/label`, `DELETE /api/unknowns/clear`, `DELETE /api/unknowns/{id}` | Proxy to face-recognizer :8081, emits event on label |
-| `zones.py` | `GET /api/zones`, `POST /api/zones`, `PUT /api/zones/{id}`, `DELETE /api/zones/{id}` | Zone CRUD in Redis hash |
-| `notifications.py` | `GET /api/notifications/status`, `POST /api/notifications/test` | Telegram bot integration + feedback inline buttons |
-| `feedback.py` | `GET /api/feedback`, `GET /api/feedback/stats`, `GET /api/feedback/rules`, `POST /api/feedback/{event_id}`, `POST /api/feedback/rules/{id}/toggle`, `DELETE /api/feedback/rules/{id}` | Self-learning feedback CRUD + suppression rules |
-| `browse.py` | `GET /api/browse/days`, `GET /api/browse/days/{date}`, `GET /api/browse/snapshot/{date}/{filename}`, `GET /api/browse/faces` | Vehicle snapshot browser + enrolled faces gallery |
-| `ai.py` | `GET /api/ai/status`, `GET /api/ai/config`, `POST /api/ai/config`, `POST /api/ai/chat`, `GET /api/ai/history`, `DELETE /api/ai/history`, `POST /api/ai/reset`, `GET /api/ai/reminders`, `GET /api/ai/clip/{filename}` | AI assistant: Ollama chat + 22 tools. Uses `think=False` + `keep_alive="4h"` to avoid Qwen3 thinking delay and cold-start. Dashboard startup fires a warmup request to pre-load the model into GPU memory. VRAM state self-heals by querying Ollama `/api/ps`. |
-| `ai_tools.py` | (internal, called by `ai.py`) | 22 tool schemas + executor functions (events, events by date, patterns, activity heatmap, faces, unknowns, show faces, feedback, retrain, record verdict, live scene, capture snapshot/clip, weather, vehicles, zones, notifications, Telegram, reminders, status, review, analyze image) |
-| `ai_prompts.py` | (internal, called by `ai.py`) | Dynamic system prompt builder with live system info |
-| `ai_state.py` | (internal) | Per-request media side-channel state (snapshot/clip stash, request UUID) |
-| `bot_commands.py` | (internal, background task) | Telegram bot polling loop + 15 command handlers (/snapshot, /clip, /status, /ask, /arm, /disarm, /who, /events, /zones, /rules, /night, /faces, /timelapse, /analyze, /help) + photo analysis handler |
-| `telegram_access.py` | `GET /api/telegram/users`, `POST /api/telegram/users`, `DELETE /api/telegram/users/{id}`, `GET /api/telegram/access-log` | Telegram user CRUD + access audit log |
-
-**Shared state pattern:** `routes/__init__.py` defines module-level variables (`r`, `r_bin`, `logger`, `FACE_API_URL`, `HD_FRAME_KEY`, all stream keys). `server.py` sets these before importing routers. Each route module does `import routes as ctx` to access them. `r` is the text Redis client (`decode_responses=True`) and `r_bin` is the binary client (`decode_responses=False`) for JPEG frame data.
+| Module | Prefix | Purpose |
+|--------|--------|---------|
+| `ai.py` | `/api/ai` | Chat, vision analysis, history, reminders, model status |
+| `ai_tools.py` | — | 18 LLM tool definitions + executor functions |
+| `ai_prompts.py` | — | System prompt builder with live context |
+| `ai_state.py` | — | Shared AI state (DB refs, GPU flag, pending media) |
+| `notifications.py` | `/api` | Telegram API helpers, scene analysis, snapshot drawing |
+| `bot_commands.py` | — | Telegram polling loop, 11 command handlers, audit logging |
+| `image_gen.py` | `/api/generate` | ComfyUI proxy, txt2img, img2img, gallery, prompt history |
+| `recordings.py` | `/api/recordings` | DVR playback — list dates, segments, stream video |
+| `events.py` | `/api/events` | Event feed retrieval from Redis stream |
+| `config.py` | `/api/config` | Read/write detection config to Redis |
+| `zones.py` | `/api/zones` | Zone CRUD (create, update, delete, list) |
+| `faces.py` | `/api/faces` | Face enrollment proxy to face-recognizer service |
+| `unknowns.py` | `/api/unknowns` | Unknown face management (list, label, delete) |
+| `browse.py` | `/api/browse` | Vehicle snapshot browser, enrolled faces gallery |
+| `clips.py` | `/api/clips` | Video clip listing, serving, deletion |
+| `conditions.py` | `/api/conditions` | Time period, sunrise/sunset, weather data |
+| `metrics.py` | `/api/metrics` | Prometheus metrics endpoint for dashboard stats |
+| `auth.py` | `/api/auth` | Login, logout, session management |
+| `telegram_access.py` | `/api/telegram` | Telegram user approval, role management, access log |
+| `__init__.py` | — | Shared state (Redis clients, key names, defaults) |
 
 ---
 
-## Frontend Deep Dive
+## Dashboard Frontend
 
-All files in `services/dashboard/static/`. No build step — plain HTML/JS/CSS.
+### Pages
+
+| File | URL | Purpose |
+|------|-----|---------|
+| `index.html` | `/` | Live camera view + settings + events + zones + faces + browse |
+| `ai.html` | `/ai.html` | AI chat + vision + DVR + image generation |
+| `monitoring.html` | `/monitoring.html` | System health + embedded Grafana |
+| `telegram.html` | `/telegram.html` | Telegram user management + access log |
+| `login.html` | `/login.html` | Authentication page |
+
+### JavaScript Modules
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `index.html` | ~578 | Main dashboard: video feed, sidebar panels (events, faces, unknowns, zones, conditions, settings, notifications, auth). Enrollment wizard modal. Label modal. |
-| `ai.html` | ~673 | AI assistant page: tab layout for AI chat + Image Gen + Vision + Video tabs |
-| `telegram.html` | ~339 | Telegram Access Manager page (approved users + access log) |
-| `login.html` | ~1005 | Login page with animated pulsing eye icon, dark theme, fade-in form |
-| `style.css` | ~2420 | Full dark theme, glassmorphism panels, responsive navbar (CSS-class-based, mobile 2-row wrap), zone editor styles, wizard overlay styles, event photo lightbox modal |
-| `ai.css` | ~1129 | AI assistant page styles (chat bubbles, onboarding wizard, tool status, vision tab) |
-| `generate.css` | ~2086 | Image gen + sweep + gallery styling |
-| `video.css` | ~870 | Video tab styling |
-| `app.js` | ~364 | Core: WebSocket connect (auto-reconnect 2s), FPS counter, settings sliders (debounced 300ms POST), notification status, `init()` orchestrator |
-| `ai.js` | ~837 | AI chat client: onboarding wizard, message rendering (markdown + inline images), tool-call status display, VRAM tab state management |
-| `generate.js` | ~1771 | Image gen + gallery + sweeps + creative chat |
-| `video.js` | ~761 | Video production tab + WAN LoRA selector |
-| `auth.js` | ~103 | Logout, change password/username, auth status display |
-| `events.js` | ~380 | Polls `/api/events` every 2s, deduplicates by event ID, renders event cards with icons + clickable photo thumbnails (face photos for known users, camera snapshots for unknowns), lightbox modal for full-size viewing |
-| `faces.js` | ~385 | Multi-angle enrollment wizard (5 angles: front/left/right/up/down), face gallery grouped by name, delete all angles for a person |
-| `unknowns.js` | ~192 | Unknown faces gallery, label modal (dropdown of known names OR free text), bulk clear |
-| `conditions.js` | ~174 | Fetches `/api/conditions` every 5min, renders time periods, sunrise/sunset, weather emoji mapping |
-| `zones.js` | ~527 | Canvas overlay zone drawing (click-to-place polygon, double-click to close), drag-to-edit vertices, letterbox-aware coordinate normalization, zone list with color-coded alert levels |
-| `feedback.js` | ~374 | Feedback review queue: verdict history, suppression rules, stats panel, quick-resolve actions |
-| `browse.js` | ~206 | Vehicle snapshot browser: day picker, thumbnail grid, face gallery tab |
-| `telegram_access.js` | ~223 | Telegram Access Manager: user list, approve/revoke, access log rendering |
+| `app.js` | 362 | WebSocket connection, settings sliders, module init |
+| `ai.js` | 962 | AI chat, vision tab, DVR tab, onboarding wizard |
+| `generate.js` | 1570 | Image generation, gallery, sweep, img2img, prompt history |
+| `events.js` | 345 | Event feed polling, rendering, face cache, photo lightbox |
+| `zones.js` | 500+ | Zone drawing canvas, CRUD operations, alert level config |
+| `faces.js` | 430+ | Face enrollment wizard, multi-angle capture |
+| `browse.js` | 260+ | Vehicle snapshot browser, face gallery |
+| `conditions.js` | 200+ | Time period display, weather fetch |
+| `unknowns.js` | 190+ | Unknown face grid, label/delete operations |
+| `monitoring.js` | 180 | Health cards, Grafana iframe, fullscreen toggle |
+| `telegram_access.js` | 240+ | User approval/revoke, access log viewer |
+| `auth.js` | 110+ | Login form, session management |
 
-**Initialization (`app.js init()`):**
-1. Connect WebSocket
-2. Load config (populate sliders)
-3. Load zones, faces, unknowns
-4. Start event polling (2s interval)
-5. Start face/unknown refresh (30s), zone refresh (15s)
-6. Check notification status
+### CSS
+
+| File | Purpose |
+|------|---------|
+| `style.css` | Main dashboard styles (live view, events, settings, zones) |
+| `ai.css` | AI chat interface, DVR player |
+| `generate.css` | Image generation UI, gallery, sweep, lightbox |
+| `monitoring.css` | System monitor cards, Grafana embed |
 
 ---
 
-## Inter-Service Communication
+## Tracker Service
 
-| From | To | Mechanism | What |
-|------|----|-----------|------|
-| ingester → detector | Redis Stream (consumer group) | `frames:{camera_id}` | JPEG frames |
-| detector → tracker | Redis Stream (consumer group) | `detections:pose:{camera_id}` | Bboxes + keypoints |
-| detector → recognizer | Redis Stream (separate consumer group) | `detections:pose:{camera_id}` | Same detection stream |
-| recognizer → tracker | Redis Hash | `identity_state:{camera_id}` | Name ↔ bbox mapping (polled every 2s) |
-| recognizer → dashboard | Redis Hash | `identity_state:{camera_id}` | Same identity data |
-| tracker → dashboard | Redis Hash | `state:{camera_id}` | Current tracked persons |
-| tracker → dashboard | Redis Stream | `events:{camera_id}` | Semantic events |
-| dashboard → detector | Redis Hash | `config:{camera_id}` | confidence_thresh via hot-reload |
-| dashboard → tracker | Redis Hash | `config:{camera_id}` | iou_threshold, lost_timeout via hot-reload |
-| dashboard → tracker | Redis Hash | `zones:{camera_id}` | Zone polygons + alert levels |
-| dashboard → recognizer | HTTP proxy | port 8081 | Enrollment, face CRUD, unknowns |
-| dashboard → Telegram | HTTPS API | Telegram Bot API | Photo + caption notifications |
-| browser → dashboard | WebSocket | `/ws/live` | Live frame stream (downstream only) |
-| browser → dashboard | REST | `/api/*` | Config, events, faces, zones, auth |
+### Person Tracking
+- **IoU matching**: for each new detection, compute overlap with every tracked person's last bbox
+- **Threshold**: if IoU > 0.3, same person → update state
+- **Debounce**: new person must persist 15 frames (~1s) before `person_appeared` event
+- **Lost timeout**: if person not seen for `lost_timeout` seconds → `person_left` event
+- **Action classification**: keypoint geometry → standing, sitting, crouching, lying (from `contracts/actions.py`)
+- **Direction estimation**: bbox center history → left, right, stationary
+- **Snapshot at detection**: tracker grabs the frame at event emission time (stored with 2h TTL)
 
-**Important:** The dashboard → face-recognizer HTTP proxy is the only inter-service communication that bypasses Redis. This is because enrollment is a request/response pattern (user expects immediate feedback), not a fire-and-forget stream.
+### Vehicle Tracking
+- Same IoU pattern, separate `TrackedVehicle` class
+- **Idle detection**: if vehicle stationary > `vehicle_idle_timeout` (default 90s) → `vehicle_idle` event
+- **Stationarity check**: max displacement from first center < 30px
+- Vehicle snapshots stored with 24h TTL
 
----
-
-## Hot-Reload Config System
-
-The dashboard writes config to `config:{camera_id}` Redis hash. Services poll this key:
-
-| Service | Key(s) | Poll Frequency |
-|---------|--------|----------------|
-| pose-detector | `confidence_thresh` | Every 25 frames (~half second) |
-| vehicle-detector | `vehicle_confidence_thresh` | Every 25 frames (~half second) |
-| tracker | `iou_threshold`, `lost_timeout`, `vehicle_idle_timeout`, `suppress_known` | Every 10 messages |
-| tracker | zone definitions | Every 10 seconds |
-| tracker | identity state | Every 2 seconds |
-| dashboard | zone cache for overlay | Every 5 seconds |
-
-**No restart required.** The user drags a slider → 300ms debounce → POST /api/config → Redis HSET → next poll cycle picks it up.
+### Zone Checks
+- Each detection is checked against configured zones using ray-casting point-in-polygon
+- Zone alert levels: `always`, `night_only`, `day_only`, `log_only`, `ignore`
+- Alert decision uses `contracts/time_rules.py` `should_alert(zone_level, current_period)`
+- Dead zones: detections inside dead zones are completely ignored
 
 ---
 
-## Authentication System
+## Face Recognition
 
-**Backend:** `routes/auth.py` — SQLite `auth.db` on Docker volume `auth-data`.
+### Service: `face-recognizer`
+- **Model**: InsightFace (buffalo_l) running on GPU
+- **Database**: SQLite at `/data/faces.db`
+- **Match threshold**: cosine similarity > 0.5
+- **API port**: 8081 (proxied through dashboard)
 
-| Aspect | Implementation |
-|--------|---------------|
-| Password storage | SHA-256 with per-user random 16-byte salt |
-| Session tokens | `username:timestamp:HMAC-SHA256(secret_key, username:timestamp)` |
-| Session expiry | 24 hours |
-| Cookie | `vl_session`, httponly, samesite=lax, path=/ |
-| Secret key | Auto-generated on first boot, stored in `app_config` table, persists across restarts |
-| Default credentials | `admin` / `admin` (created if users table is empty) |
+### Endpoints (via dashboard proxy)
+- `POST /api/faces/enroll` — capture frame, extract embedding, save to DB
+- `GET /api/faces` — list all enrolled faces
+- `GET /api/faces/{id}/photo` — serve portrait JPEG
+- `DELETE /api/faces/{id}` — delete enrollment
 
-**Exempt paths (no auth needed):** `/login.html`, `/api/auth/login`, `/api/auth/status`, `/style.css`, `/auth.js`, `/favicon.ico`
+### Sticky Identity
+Once a face is recognized, the name stays on the bounding box even when the person turns away. A 10-frame vote buffer with 2× bias for the current identity prevents flicker.
+
+### Unknown Face Management
+Unrecognized faces are auto-captured and can be labeled later via the dashboard (`/api/unknowns`).
+
+---
+
+## AI Assistant
+
+### Models
+| Model | Purpose | Size |
+|-------|---------|------|
+| **Qwen 3 14B** | Chat + tool calling | ~9.3 GB |
+| **MiniCPM-V** | Vision analysis (image description) | ~5 GB |
+
+Both run via Ollama with 5-minute keep-alive. VRAM is shared with ComfyUI via a GPU lock flag.
+
+### Chat Flow
+```
+User message → build system prompt with live context
+→ Qwen 3 14B with TOOLS schema
+→ if tool_calls: execute tool → feed result back → re-prompt (up to 5 rounds)
+→ final text reply (with embedded media if tools produced any)
+```
+
+### System Context (injected each message)
+- Current date/time, location, weather
+- People currently in frame (from state key)
+- Known faces list
+- Active zones
+- Recent events summary
+- Notification status
+- System health
+
+### 18 Tool Functions
+See `routes/ai_tools.py` — each returns a JSON string the LLM uses to formulate its response. Tools can stash media (snapshots, clips, images) via `ai_state` for embedding in the reply.
+
+---
+
+## Image Generation
+
+### Service: ComfyUI
+- Mounts `./models/comfyui/` for checkpoints, LoRAs, VAE
+- Dashboard proxies all requests to `http://comfyui:8188`
+
+### Features
+- **txt2img**: prompt → ComfyUI workflow → poll for result
+- **img2img**: upload source image + denoise strength
+- **Batch generation**: queue multiple seeds
+- **Parameter sweep**: steps × CFG × LoRA strength grid
+- **Gallery**: browse generated images with metadata, lightbox preview, "Use These Settings"
+- **Prompt history**: server-side storage with revision tracking (tracks changes during generation)
+- **VRAM management**: `gpu:generation_active` flag pauses detectors during generation, auto-unloads Ollama models
 
 ---
 
 ## Notification System
 
-**Backend:** `routes/notifications.py` — Telegram Bot API via `httpx`.
+### Alerts
+When Telegram is configured, the dashboard background poller sends photo alerts:
 
-| Event | Trigger | Rate Limited? | Photo Source |
-|-------|---------|---------------|--------------|
-| Person detected | `person_appeared` event | Yes (1 per 60s, logged when skipped) | HD frame (fallback: sub-stream) + `snapshot_bbox` highlight |
-| Person identified | `person_identified` event | No (always important) | HD frame (fallback: sub-stream) + `snapshot_bbox` highlight |
-| Vehicle idle | `vehicle_idle` event | Yes (1 per 60s, logged when skipped) | HD frame (fallback: sub-stream) + bbox highlight, duration formatted as human-readable (e.g. "20 min") |
-| Face enrolled | Enrollment API success | No | Face thumbnail from face-recognizer |
-| Test notification | Manual button click | No | HD frame (fallback: sub-stream) |
+| Event | Photo | Caption Contains |
+|-------|:-----:|-----------------|
+| `person_appeared` | HD snapshot with bbox | Time, zone, action, AI scene description |
+| `person_identified` | HD snapshot with bbox | Name, time, zone |
+| `vehicle_idle` | Vehicle snapshot with bbox | Vehicle class, duration, zone |
 
-`get_latest_frame()` tries `frame_hd:{camera_id}` first for higher resolution, falling back to the sub-stream. `draw_bbox_on_frame()` scales bbox coordinates from sub-stream pixels to HD resolution when the HD frame is used. The dashboard uses `snapshot_bbox` (saved at event emission time) instead of the live `bbox` to ensure the annotation matches the saved frame.
+### Rate Limiting
+- Per-event-type cooldowns (configurable via dashboard settings)
+- Default: 60s person cooldown, 60s vehicle cooldown
+- `suppress_known` toggle: skip notifications for recognized people
 
-**Architecture:** The dashboard runs a background `asyncio` task (`_event_notification_poller`) that does `XREAD` on the event stream in a thread executor (to avoid blocking the event loop). For every `person_appeared` event, it saves a camera snapshot to `/data/snapshots/` (used by the event feed thumbnails). When Telegram is configured and relevant events fire, it calls `send_photo()` which POSTs to Telegram's `sendPhoto` endpoint.
+### Broadcasting
+All alerts are sent to **every approved Telegram user** (multi-user support).
 
-**Config:** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from `.env` → docker-compose environment.
+---
+
+## Telegram Bot
+
+### Polling Architecture
+`bot_commands.py` runs a long-polling loop as a background task:
+1. `getUpdates` from Telegram API (30s timeout)
+2. Validate user via `telegram:users` Redis hash
+3. Route to command handler
+4. Log to `telegram:access_log` stream + per-user audit files on NAS
+
+### Commands
+`/snapshot`, `/clip [N]`, `/status`, `/arm`, `/disarm`, `/who`, `/events [N]`, `/analyze`, `/help`, plus photo analysis (send any photo to get MiniCPM-V description).
+
+### Access Control
+- Users managed via dashboard Telegram Access Manager page
+- Roles: `admin` (full access) and `user` (limited)
+- Bootstrap: `TELEGRAM_ALLOWED_USERS` env var seeds initial users
+
+---
+
+## DVR Recording
+
+### Service: `recorder`
+- **Method**: ffmpeg RTSP→MP4 copy (no transcode — very low CPU)
+- **Segments**: 1-hour MP4 files
+- **Retention**: 28-day rolling cleanup
+- **Storage**: QNAP NAS via CIFS mount at `/recordings/`
+- **Naming**: `{camera_id}/YYYY-MM-DD/HH-MM-SS.mp4`
+
+### Playback API (`recordings.py`)
+- `GET /api/recordings/dates` — list available recording dates
+- `GET /api/recordings/segments?date=YYYY-MM-DD` — list segments for a date
+- `GET /api/recordings/stream/{date}/{segment}` — stream MP4 with range support
+
+---
+
+## Zone System
+
+### Zone Types
+| Alert Level | Behavior |
+|-------------|----------|
+| `always` | Alert on any detection, any time |
+| `night_only` | Alert only during night/late-night periods |
+| `day_only` | Alert only during daytime |
+| `log_only` | Log to event feed but no Telegram notification |
+| `ignore` | Completely ignore detections (dead zone) |
+
+### Time Periods
+| Period | Window |
+|--------|--------|
+| **Daytime** | Sunrise + 30min → Sunset − 30min |
+| **Twilight** | ±30 min around sunrise and sunset |
+| **Night** | Sunset + 30min → Midnight |
+| **Late Night** | Midnight → Sunrise − 30min |
+
+### Zone Drawing
+Browser-side canvas drawing tool with polygon support. Zones stored in `zones:{camera_id}` Redis hash, read by tracker for alert decisions and by dashboard for overlay rendering.
+
+---
+
+## Monitoring Stack
+
+- **Prometheus** scrapes redis-exporter (Redis stats) and dcgm-exporter (GPU stats)
+- **Grafana** serves dashboards at `:3000`, embedded in the System Monitor page via iframe
+- **Dashboard metrics** (`routes/metrics.py`) exposes custom Prometheus metrics: inference timing, detection counts, event rates
+
+---
+
+## Shared Contracts
+
+The `contracts/` directory is mounted read-only into every service container:
+
+| File | Exports | Used By |
+|------|---------|---------|
+| `streams.py` | Redis key templates (`FRAME_STREAM`, `EVENT_STREAM`, etc.) + `stream_key()` resolver + data schema documentation | All services |
+| `actions.py` | `classify_action(keypoints)` — keypoint geometry → action label | tracker |
+| `time_rules.py` | `get_time_period(dt)`, `should_alert(level, period)`, `point_in_polygon()` | tracker, dashboard |
+
+---
+
+## Authentication
+
+- **Session-based**: cookie + server-side session store in SQLite (`/data/auth.db`)
+- **Middleware**: `auth_middleware` in `server.py` intercepts all requests except login, static assets, and API auth endpoints
+- **Login page**: blurred camera snapshot background (no auth required for the blurred image)
+
+---
+
+## NAS Storage Layout
+
+All persistent storage beyond Redis uses QNAP NAS CIFS mounts:
+
+```
+/data/
+├── snapshots/              ← Person detection snapshots
+│   └── vehicles/           ← Vehicle snapshots organized by YYYY-MM-DD/
+│       └── 2026-02-28/
+│           └── 14-30-45_car.jpg
+├── events/                 ← Event journal (daily JSONL)
+│   └── 2026-02-28.jsonl
+├── recordings/             ← DVR segments (read-only in dashboard)
+│   └── front_door/
+│       └── 2026-02-28/
+│           └── 14-00-00.mp4
+├── telegram/               ← Per-user bot command audit trail
+│   └── username_12345/
+│       ├── commands.log
+│       └── media/
+├── generations/            ← ComfyUI output images
+├── clips/                  ← Captured video clips
+└── auth.db                 ← Session/auth SQLite database
+```
 
 ---
 
 ## Docker Infrastructure
 
-### docker-compose.yml
-
-11 services, 14 named volumes:
-
-| Volume | Mount Point | Purpose |
-|--------|-------------|---------|
-| `redis-data` | `/data` (redis) | Redis persistence (AOF) |
-| `face-data` | `/data` (face-recognizer) | SQLite face DB + unknowns |
-| `yolo-models` | `/root/.config/Ultralytics` | YOLOv8 model cache |
-| `insightface-models` | `/root/.insightface` | InsightFace buffalo_l cache |
-| `auth-data` | `/data` (dashboard) | Auth + feedback + AI SQLite databases |
-| `snapshot-data` | `/data/snapshots` (dashboard) | Event + vehicle snapshots (persists across container restarts) |
-| `ollama-models` | `/root/.ollama` (ollama) | Qwen 3 14B + MiniCPM-V 2.6 model weights |
-| `comfyui-data` | `/app/models` (comfyui) | SDXL checkpoints, WAN 2.1 models (FP8), AnimateDiff, LoRAs, VAE, CLIP |
-| `piper-data` | `/data` (piper) | Piper TTS voice models |
-| `qnap-snapshots` | `/data/snapshots` (dashboard) | Event snapshots (currently local volumes — QNAP CIFS disabled) |
-| `qnap-recordings` | `/recordings` (recorder) | DVR MPEG-TS segments (currently local volumes — QNAP CIFS disabled) |
-| `qnap-events` | `/data/events` (dashboard) | Daily JSONL event journal (currently local volumes — QNAP CIFS disabled) |
-| `qnap-telegram` | `/data/telegram` (dashboard) | Per-user Telegram audit trail (currently local volumes — QNAP CIFS disabled) |
-| `qnap-generations` | `/data/generations` (dashboard) | AI-generated images (currently local volumes — QNAP CIFS disabled) |
-| `qnap-videos` | `/data/videos` (dashboard) | AI-produced videos (currently local volumes — QNAP CIFS disabled) |
-
-### Shared Contract Mounting
-
-Every service that imports from `contracts/` mounts the project root's `contracts/` directory:
-
-```yaml
-volumes:
-  - ./contracts:/app/contracts:ro
-```
-
-This ensures a single source of truth — change a stream key in `contracts/streams.py` and every service picks it up on next restart.
-
-### GPU Access
-
-`pose-detector`, `face-recognizer`, `vehicle-detector`, `ollama`, and `comfyui` use the NVIDIA runtime:
-
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: 1
-          capabilities: [gpu]
-```
-
-### Network
-
-- Default bridge network for inter-container communication
-- `camera-ingester` and `recorder` use `network_mode: host` to reach the camera at 192.168.2.10
-- Dashboard exposes port 8080 to host
-- Face-recognizer exposes port 8081 (internal, proxied by dashboard)
-
----
-
-## Test Suite
-
-All tests in `tests/`. Run with: `pytest tests/ -v`
-
-| Test File | What It Tests | Key Coverage |
-|-----------|---------------|--------------|
-| `test_actions.py` | `contracts/actions.py` | All 5 action classifications, edge cases, missing keypoints |
-| `test_time_rules.py` | `contracts/time_rules.py` | All 4 time periods, `should_alert()` matrix, `point_in_polygon()` edge cases |
-| `test_face_db.py` | `face_db.py` | Enroll, match, delete, unknowns, dedup, reconciliation, max limit |
-| `test_feedback_db.py` | `feedback_db.py` | Feedback records, suppression rules, retrain, auto-rule generation |
-| `test_tracker.py` | `tracker.py` | IoU computation, TrackedPerson state, PersonTracker.update(), debounce |
-| `test_routes.py` | `routes/*.py` | Dashboard API endpoints: zones, config, events, auth, notifications (mocked Redis) |
-| `test_vehicles.py` | Vehicle pipeline | Vehicle events, snapshot storage, idle detection, browse API |
-
----
-
-## Current Status vs v2.md Plan
-
-| Phase | Status | Notes |
-|-------|--------|-------|
-| **0: Hardware** | ✅ Complete | Camera, switch, NAS, PoE injector all working |
-| **1: Camera + Redis** | ✅ Complete | RTSP → Redis at 15 FPS, reconnect logic |
-| **2: YOLO + Tracker** | ✅ Complete | YOLOv8s-pose ~34ms, IoU tracking, events |
-| **3: Dashboard** | ✅ Complete | Live feed, overlays, event feed, settings |
-| **4: Actions** | ✅ Complete | 5 actions classified, debounce + sticky bias |
-| **5: Face ReID** | ✅ Complete | InsightFace buffalo_l, multi-angle enrollment, sticky identity, unknowns |
-| **6: Zones + Alerts** | ✅ Complete | Zone drawing, time rules, dead zones, Telegram notifications. Remaining: event clip recording |
-| **6.1: Auth** | ✅ Complete | Login page, cookie sessions, change password |
-| **6.2: Vehicles** | ✅ Complete | YOLOv8s vehicle detection, snapshots, idle alerts, live overlay bboxes |
-| **6.5: Self-Learning** | ✅ Complete | Feedback DB, Telegram inline buttons, suppression rules, review queue, dashboard widget |
-| **7: AI Assistant** | ✅ Complete | Ollama + Qwen 3 14B, onboarding wizard, chat UI, 22 tools (query events/faces/unknowns/feedback/patterns, live scene, capture snapshot with weather+scene description, capture 5-second video clip in chat, weather, browse vehicles/zones/notification history, retrain rules, send Telegram, schedule reminders, system status, activity heatmap, record verdict, show faces, analyze image via MiniCPM-V) |
-| **7.5: Telegram Access Manager** | ✅ Complete | Web-based user management page. Approve/revoke Telegram users, view access log. Unauthorized bot access emits `unauthorized_access` events to event stream |
-
-**Minor remaining from Phase 6:** Event clip recording (10s clips around detections, saved to QNAP).
-
-### Phase 9: QNAP NAS Storage (Implemented)
-
-| Feature | Implementation |
-|---------|---------------|
-| **DVR recording** | `services/recorder/recorder.py` — ffmpeg remux to 1-hour MPEG-TS segments. 28-day rolling retention. |
-| **Event journal** | `server.py` — all events appended as JSON lines to daily files (`/data/events/YYYY-MM-DD.jsonl`) |
-| **Telegram audit trail** | `bot_commands.py` — per-user command logs + media copies (`/data/telegram/@username/`) |
-| **Docker volumes** | 6 QNAP CIFS volumes: `qnap-snapshots`, `qnap-recordings`, `qnap-events`, `qnap-telegram`, `qnap-generations`, `qnap-videos` |
-
----
-
-## Phase 6.5: Self-Learning Feedback Loop (Implemented)
-
-### What it adds
-
-An alert suppression engine that learns from user feedback over time, reducing false notifications from ~15/day to ~2/day.
-
-### Components built
-
-1. **`feedback_db.py`** — SQLite database for feedback records + suppression rules
-2. **`routes/feedback.py`** — REST API for viewing feedback, managing rules, submitting verdicts
-3. **Telegram inline buttons** — ✅/❌/🏷️ on notifications, callbacks store feedback
-4. **Suppression rules** — auto-generated when patterns exceed thresholds (3 identity false alarms, 5 zone+time false alarms)
-5. **AI retrain tool** — the AI assistant can re-scan all feedback and regenerate rules on demand
-6. **`feedback.js`** — dashboard review queue UI
-
-### How it stays modular
-
-- Suppression engine is a **pure function** `should_suppress(identity, zone, time_period)` — no Redis coupling
-- Feedback storage is a **separate SQLite DB** (not mixed with face DB or auth DB)
-- Review queue is a **new routes module** (`routes/feedback.py`) — follows existing pattern
-- Telegram inline buttons use Telegram's callback_query API — existing `notifications.py` extended
-- All existing services remain **unchanged** — suppression happens in `notifications.py` before sending Telegram alerts
-
-### How it stays secure
-
-- No retraining of YOLO/InsightFace (those are frozen foundation models)
-- Suppression model is deterministic (threshold-based) — trains instantly, no GPU needed
-- Review queue protected by existing auth middleware
-
----
-
-## Modularity & Security Principles
-
-### Adding a new camera
-
-1. Assign static IP (192.168.2.11, etc.)
-2. Add new ingester service in docker-compose.yml with `CAMERA_ID=backyard`
-3. `docker compose up -d camera-ingester-2`
-4. All downstream services auto-discover via Redis key pattern `frames:backyard`
-
-### Adding a new detector
-
-1. Create new service that reads `frames:*`, publishes to `detections:mytype:*`
-2. Add docker-compose entry
-3. Tracker auto-discovers if it's configured to read the new detection stream
-4. Zero changes to existing services
-
-### Fault isolation
-
-- Any service can crash without affecting others
-- Redis Streams persist — crashed service catches up from last consumer group cursor
-- Dashboard shows "offline" states for disconnected components
-- Face recognition failure → person detection still works, just no names
-
-### Security
-
-- All traffic is LAN-only (no port forwarding to internet)
-- Auth protects dashboard with cookie sessions
-- Telegram uses HTTPS to external API (only outbound connection)
-- Face embeddings are 512-dim float vectors — cannot be reversed to reconstruct a face
-- No audio recording (Ontario privacy law compliance)
-- Dead zones prevent tracking in specific areas (e.g., neighbor's property)
-
----
-
-## Phase 10: Image Generation (SDXL + LoRA)
-
-Stable Diffusion XL image generation via ComfyUI, fully integrated into the dashboard.
-
-### Pipeline
-
-```
-Dashboard UI
-    │ prompt, model, LoRA, steps, CFG, seed, batch_size
-    ▼
-POST /api/generate → ComfyUI /prompt (txt2img or img2img workflow)
-    │
-    ▼
-Poll /api/generate/history/{prompt_id} until complete
-    │
-    ▼
-Images served from ComfyUI output dir + QNAP gallery backup
-```
-
-### Features
-
-| Feature | Implementation |
-|---------|---------------|
-| **txt2img** | `_build_txt2img_workflow()` — CheckpointLoader → CLIPTextEncode → KSampler → VAEDecode → SaveImage |
-| **img2img** | `_build_img2img_workflow()` — upload image → LoadImage → VAEEncode, denoise=0.65 |
-| **LoRA support** | Optional LoraLoader node chained between checkpoint and prompt encoders |
-| **Batch generation** | `batch_size` parameter on KSampler (1–8 images per generation) |
-| **Parameter sweeps** | UI for sweeping steps, CFG, LoRA strength with per-combo batch count |
-| **Gallery** | Paginated gallery with lightbox, arrow navigation, download, copy prompt |
-| **Prompt history** | Searchable log of all past prompts with metadata sidecars |
-| **Creative chat** | Dolphin model via Ollama for prompt refinement, floating modal UI |
-| **VRAM management** | Auto-unload Ollama models before generation, restore after. GPU pause flag (`gpu:generation_active`) pauses pose/vehicle detectors during generation. VRAM mode endpoint self-heals by querying Ollama `/api/ps`. |
-
-### Files
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `routes/image_gen.py` | ~1049 | Workflow builders, generation API, gallery, VRAM management, GPU pause coordination |
-| `static/generate.js` | ~1721 | Image gen UI, gallery, sweeps, prompt history, creative chat |
-| `static/generate.css` | ~1806 | Image gen + sweep + gallery styling |
-| `static/ai.html` | ~618 | Tab layout for AI chat + Image Gen + Vision + Video |
-
----
-
-## Phase 11: Vision Analysis (MiniCPM-V)
-
-Multimodal vision model via Ollama for describing camera scenes and analyzing uploaded images.
-
-### Capabilities
-
-- **Camera snapshots** — capture live frame, describe what's visible
-- **Image upload** — drag-and-drop or paste images for analysis
-- **Video frames** — extract frames from uploaded video for scene understanding
-- **Chat integration** — vision responses appear inline in the AI chat panel
-
-### Model
-
-| Property | Value |
-|----------|-------|
-| Model | MiniCPM-V 2.6 |
-| VRAM | ~5.5 GB |
-| Hosting | Ollama (auto-swap with Qwen 3) |
-| Input | Image (JPEG/PNG) + text prompt |
-| Output | Natural language description |
-
----
-
-## Phase 12: Video Production (WAN 2.1 + TTS)
-
-AI video generation pipeline: script → SDXL keyframe → WAN 2.1 animation → narration → final video.
-
-### Pipeline Flow
-
-```
-1. Script Generation (Ollama)
-   User prompt → JSON { title, characters[], scenes[{image_prompt, narration, duration}] }
-
-2. Keyframe Generation (ComfyUI + SDXL)
-   Per scene: SDXL checkpoint → single keyframe image (832×480)
-   Optional: IPAdapter for character face conditioning
-   Optional: SDXL LoRA for style
-
-3. WAN 2.1 Image-to-Video (ComfyUI)
-   Per scene: keyframe → WAN 2.1 14B FP8 → 81 frames at 16fps (~5 seconds)
-   Uses: UNETLoader (GGUF) → WanImageToVideo → SamplerCustomAdvanced → VHS_VideoCombine
-   Optional: WAN LoRA for animation quality
-   Fallback: AnimateDiff if WAN models not available
-
-4. TTS Narration (Piper)
-   Per scene: narration text → Wyoming protocol → WAV audio
-
-5. Assembly (ffmpeg)
-   Per scene: loop clip + merge audio → pad/trim to duration
-   Final: concat all scenes → libx264 CRF 23, AAC 128k
-```
-
-### Character System
-
-Characters stored at `/data/characters/{slug}/meta.json` with reference images. During keyframe generation, character names are matched in scene prompts and their reference images are injected via IPAdapter Plus Face (`ip-adapter-plus-face_sdxl_vit-h.safetensors`). The keyframe then provides pixel-perfect character consistency to WAN.
-
-### WAN 2.1 Models (auto-downloaded on first boot)
-
-| Model | File | Size |
-|-------|------|------|
-| Diffusion (14B FP8) | `wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors` | ~14 GB |
-| Text Encoder (FP8) | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | ~9 GB |
-| VAE | `wan_2.1_vae.safetensors` | ~335 MB |
-| CLIP Vision | `clip_vision_h.safetensors` | ~1.2 GB |
-
-### Current Specs
-
-| Spec | Value |
-|------|-------|
-| Frame count (WAN) | 81 per scene (~5 seconds) |
-| Frame count (AnimateDiff fallback) | 16 per scene |
-| FPS | 16 (WAN), 8 (AnimateDiff) |
-| Resolution | WAN native: 832×480, HD experimental: 1280×720 |
-| WAN model | `wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors` (GGUF/FP8) |
-| AnimateDiff fallback | `mm_sdxl_v10_beta.ckpt` |
-| Default SDXL model | `zillah.safetensors` (user-provided) |
-| WAN LoRA directory | `models/comfyui/wan_loras/` |
-| TTS engine | Piper (Wyoming protocol) |
-| Output codec | H.264 (libx264) CRF 23 |
-
-### Files
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `routes/video_pipeline.py` | ~2157 | Full pipeline: script gen, WAN i2v workflow, keyframe gen, AnimateDiff fallback, TTS, ffmpeg assembly, GPU pause |
-| `static/video.js` | ~761 | Video tab UI: script editor, production controls, WAN LoRA selector, history |
-| `static/video.css` | ~870 | Video tab styling |
-
----
-
-## Extensibility Roadmap
-
-### Tier 1 — Make It Smarter (low effort, high impact)
-
-| Feature | Effort | Impact | Description |
-|---------|--------|--------|-------------|
-| **Weather + time in system prompt** | 🟢 Low | 🟢 High | ✅ Done. Conditions data and current time already injected into AI context. Snapshot tool includes weather. |
-| **Recent events in context** | 🟢 Low | 🟢 High | Pre-load last 5 events into system prompt so AI can proactively mention recent activity without tool calls |
-| **Daily briefing** | 🟡 Medium | 🟢 High | Scheduled Telegram summary: "Today: 12 events, 3 unknowns, busiest at 2pm, clear weather" |
-| **Rule suggestions** | 🟡 Medium | 🟢 High | AI proactively suggests suppression rules after seeing false alarm patterns |
-
-### Tier 2 — Proactive Intelligence
-
-| Feature | Effort | Impact | Description |
-|---------|--------|--------|-------------|
-| **Anomaly detection** | 🔴 High | 🟢 High | Track "normal" patterns and flag deviations (e.g., "John usually arrives by 5pm — not home yet") |
-| **Event correlation** | 🟡 Medium | 🟡 Medium | "Person appeared → 30s later → vehicle" = likely delivery, auto-label as routine |
-| **Auto-escalation** | 🟡 Medium | 🟢 High | Multiple unknowns in dead zone during night → high-priority Telegram without waiting for user query |
-| **Conversation memory** | 🟡 Medium | 🟡 Medium | AI remembers preferences ("always alert for driveway") persisted in ai_db |
-
-### Tier 3 — Truly Autonomous
-
-| Feature | Effort | Impact | Description |
-|---------|--------|--------|-------------|
-| **Multi-camera reasoning** | 🔴 High | 🟢 High | Correlate front + back camera: track movement through property |
-| **Voice integration** | 🟡 Medium | 🟡 Medium | Expose AI via API so Home Assistant or custom voice assistant can query it |
-| **NAS recording** | ✅ Done | ✅ Done | QNAP CIFS for continuous recording + event journal + audit trail |
-| **Event clip recording** | 🟡 Medium | 🟢 High | 10-second clips around detections, saved alongside snapshots |
-
-### Architecture Scaling Limits
-
-With the current architecture, the system can reasonably scale to:
-- **3–4 cameras** (limited by GPU VRAM: YOLO + InsightFace + Qwen compete for 24 GB)
-- **30-day event history** (Redis memory; beyond that, offload to PostgreSQL)
-- **50+ suppression rules** (deterministic engine scales linearly)
-- **20+ AI tools** (no performance degradation with current Ollama setup)
+### Networking
+- **camera-ingester** and **recorder**: `network_mode: host` (direct RTSP access to camera on LAN)
+- **All other services**: Docker bridge network, communicate via DNS names (e.g., `redis`, `ollama`, `comfyui`)
+- **Monitoring stack** (prometheus, grafana, redis-exporter, dcgm-exporter): `network_mode: host` for metric scraping
+
+### Volumes
+| Volume | Type | Purpose |
+|--------|------|---------|
+| `redis-data` | Docker | Redis AOF persistence |
+| `face-data` | Docker | InsightFace SQLite DB + portraits |
+| `yolo-models` | Docker | YOLO model weights cache |
+| `insightface-models` | Docker | InsightFace model weights cache |
+| `auth-data` | Docker | Auth SQLite DB |
+| `ollama-models` | Docker | LLM model weights (~15 GB) |
+| `comfyui-data` | Docker | ComfyUI output images |
+| `prometheus-data` | Docker | Prometheus TSDB |
+| `grafana-data` | Docker | Grafana state |
+| `qnap-*` | CIFS | 7 NAS mounts (snapshots, recordings, events, telegram, generations, videos, clips) |
+
+### GPU Sharing
+Five services share the RTX 3090:
+1. **pose-detector** — always running (~34ms/frame)
+2. **vehicle-detector** — always running
+3. **face-recognizer** — always running
+4. **ollama** — on-demand (5-min keep-alive), auto-unloaded during image generation
+5. **comfyui** — on-demand, sets `gpu:generation_active` flag to pause detectors
 
 ---
 
 ## File Index
 
+### Services
 ```
-vision-labsv1/
-├── .env                          # Secrets (camera password, Telegram tokens)
-├── .env.example                  # Template for .env
-├── .gitignore                    # Python, Docker, IDE, model ignores
-├── ARCHITECTURE.md               # THIS FILE
-├── README.md                     # Project overview
-├── build.ps1                     # Windows build/deploy script
-├── build.sh                      # Linux build/deploy script
-├── docker-compose.yml            # All 11 services + 14 volumes
-├── docker-compose.override.yml   # Local volume overrides (QNAP bypass)
-├── fix_encoding.py               # Encoding fix utility
-│
-├── models/                       # Model storage (gitignored)
-│   └── comfyui/                  # SDXL checkpoints, WAN 2.1 models, LoRAs, AnimateDiff, VAE, CLIP
-│       └── wan_loras/            # WAN-specific LoRAs (e.g. genhelpervideosafetensors.safetensors)
-│
-├── contracts/                    # Shared API contract (single source of truth)
-│   ├── __init__.py               # Package docstring
-│   ├── streams.py                # Redis key templates + data schemas
-│   ├── actions.py                # Action classifier (math-only)
-│   └── time_rules.py             # Time periods + zone alert rules (astral)
-│
-├── services/
-│   ├── camera-ingester/
-│   │   ├── Dockerfile
-│   │   ├── ingester.py           # RTSP → Redis
-│   │   └── requirements.txt
-│   │
-│   ├── pose-detector/
-│   │   ├── Dockerfile
-│   │   ├── detector.py           # YOLOv8s-pose inference
-│   │   └── requirements.txt
-│   │
-│   ├── tracker/
-│   │   ├── Dockerfile
-│   │   ├── tracker.py            # IoU tracking + events
-│   │   └── requirements.txt
-│   │
-│   ├── face-recognizer/
-│   │   ├── Dockerfile
-│   │   ├── recognizer.py         # InsightFace + REST API
-│   │   ├── face_db.py            # SQLite face database
-│   │   └── requirements.txt
-│   │
-│   ├── vehicle-detector/
-│   │   ├── Dockerfile
-│   │   ├── detector.py           # YOLOv8s vehicle detection
-│   │   └── requirements.txt
-│   │
-│   ├── recorder/
-│   │   ├── Dockerfile
-│   │   └── recorder.py           # DVR recording (ffmpeg remux, 28-day retention)
-│   │
-│   └── dashboard/
-│       ├── Dockerfile
-│       ├── server.py             # FastAPI + WebSocket (~1182 lines)
-│       ├── feedback_db.py        # Feedback + suppression rules (SQLite, ~581 lines)
-│       ├── ai_db.py              # AI config + reminders + chat history (SQLite, ~236 lines)
-│       ├── requirements.txt
-│       ├── routes/
-│       │   ├── __init__.py       # Shared state container (r, r_bin, logger, keys, ~57 lines)
-│       │   ├── auth.py           # Login/logout/password (~311 lines)
-│       │   ├── events.py         # Event feed + snapshot API (~137 lines)
-│       │   ├── config.py         # Config + stats API (~77 lines)
-│       │   ├── conditions.py     # Time + weather API (~110 lines)
-│       │   ├── faces.py          # Face enrollment proxy (~108 lines)
-│       │   ├── unknowns.py       # Unknown faces proxy (~160 lines)
-│       │   ├── zones.py          # Zone CRUD API (~110 lines)
-│       │   ├── notifications.py  # Telegram integration (~975 lines)
-│       │   ├── feedback.py       # Feedback + suppression rules API (~123 lines)
-│       │   ├── browse.py         # Vehicle snapshot browser + faces gallery (~158 lines)
-│       │   ├── ai.py             # AI assistant chat endpoint + VRAM sync (~540 lines)
-│       │   ├── ai_tools.py       # 22 AI tool schemas + executors (~1416 lines)
-│       │   ├── ai_prompts.py     # Dynamic system prompt builder (~118 lines)
-│       │   ├── ai_state.py       # Per-request media side-channel (~94 lines)
-│       │   ├── image_gen.py      # Image generation API — ComfyUI proxy + VRAM + GPU pause (~1131 lines)
-│       │   ├── video_pipeline.py # Video production pipeline — WAN 2.1 i2v + AnimateDiff fallback (~2157 lines)
-│       │   ├── bot_commands.py   # Telegram bot polling + 15 commands + photo analysis (~1468 lines)
-│       │   └── telegram_access.py # Telegram user CRUD + access log (~105 lines)
-│       └── static/
-│           ├── index.html        # Main dashboard layout (~578 lines)
-│           ├── ai.html           # AI assistant + image gen + vision + video (~673 lines)
-│           ├── telegram.html     # Telegram Access Manager (~339 lines)
-│           ├── login.html        # Login page (~1005 lines)
-│           ├── style.css         # Dashboard CSS (~2420 lines)
-│           ├── ai.css            # AI page styles (~1129 lines)
-│           ├── generate.css      # Image gen + sweep styling (~2086 lines)
-│           ├── video.css         # Video tab styling (~870 lines)
-│           ├── app.js            # Core + WebSocket + init (~364 lines)
-│           ├── ai.js             # AI chat + wizard + VRAM state logic (~837 lines)
-│           ├── generate.js       # Image gen + gallery + sweeps + creative chat (~1771 lines)
-│           ├── video.js          # Video production tab + WAN LoRA selector (~761 lines)
-│           ├── auth.js           # Auth UI (~103 lines)
-│           ├── events.js         # Event feed (~380 lines)
-│           ├── faces.js          # Face enrollment wizard (~385 lines)
-│           ├── unknowns.js       # Unknown faces gallery (~192 lines)
-│           ├── conditions.js     # Conditions panel (~174 lines)
-│           ├── zones.js          # Zone editor + canvas (~527 lines)
-│           ├── browse.js         # Vehicle snapshot browser (~206 lines)
-│           ├── feedback.js       # Feedback review queue (~374 lines)
-│           ├── telegram_access.js # Telegram Access Manager UI (~223 lines)
-│           └── favicon.svg       # Browser favicon
-│
-└── tests/                            # 248 tests — run: python -m pytest tests/ -v
-    ├── test_actions.py           # Action classifier (21 tests)
-    ├── test_time_rules.py        # Time rules + PIP geometry (21 tests)
-    ├── test_face_db.py           # Face DB lifecycle (26 tests)
-    ├── test_feedback_db.py       # Feedback + suppression (16 tests)
-    ├── test_tracker.py           # Tracker algorithms (15 tests)
-    ├── test_routes.py            # Dashboard API routes (25 tests)
-    ├── test_vehicles.py          # Vehicle pipeline (29 tests)
-    ├── test_notifications.py     # Notification logic (17 tests)
-    └── test_scene_analysis.py    # Scene analysis + description (21 tests)
+services/
+├── camera-ingester/     # RTSP → Redis frames
+├── pose-detector/       # YOLOv8s-pose → person bboxes
+├── vehicle-detector/    # YOLOv8s → vehicle bboxes
+├── tracker/             # IoU tracking → semantic events
+├── face-recognizer/     # InsightFace → face identities
+├── dashboard/           # FastAPI backend + web frontend
+│   ├── server.py        # Main app (WebSocket, event poller, startup)
+│   ├── ai_db.py         # AI chat history SQLite
+│   ├── routes/          # 20 API route modules
+│   └── static/          # 22 frontend files (HTML, JS, CSS)
+├── recorder/            # ffmpeg RTSP → MP4 DVR
+├── comfyui/             # Stable Diffusion inference
+├── prometheus/          # Metrics config
+└── grafana/             # Dashboard provisioning
 ```
 
+### Contracts
+```
+contracts/
+├── streams.py           # Redis key templates + data schemas
+├── actions.py           # Keypoint action classification
+└── time_rules.py        # Time periods, zone alert rules, PIP test
+```
